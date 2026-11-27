@@ -129,17 +129,19 @@ namespace
 	void QueuePreloadOpen()
 	{
 		using namespace std::chrono_literals;
-		const auto now = std::chrono::steady_clock::now();
+		// The equip/unequip animations must finish first: at 700 ms spacing most actions returned false (in game).
+		constexpr auto gap = 2500ms;
+		const auto     now = std::chrono::steady_clock::now();
 		g_steps.clear();
 		if (g_open) {
-			g_steps.push_back({ now, 1 });          // close
-			g_steps.push_back({ now + 700ms, 0 });  // open (loads the model)
-			g_steps.push_back({ now + 1400ms, 1 }); // close
-			g_steps.push_back({ now + 2100ms, 0 }); // open (shows it)
+			g_steps.push_back({ now, 1 });            // close
+			g_steps.push_back({ now + gap, 0 });      // open (loads the model)
+			g_steps.push_back({ now + 2 * gap, 1 });  // close
+			g_steps.push_back({ now + 3 * gap, 0 });  // open (shows it)
 		} else {
 			g_steps.push_back({ now, 0 });
-			g_steps.push_back({ now + 700ms, 1 });
-			g_steps.push_back({ now + 1400ms, 0 });
+			g_steps.push_back({ now + gap, 1 });
+			g_steps.push_back({ now + 2 * gap, 0 });
 		}
 	}
 
