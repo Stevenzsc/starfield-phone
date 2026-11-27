@@ -95,7 +95,8 @@ namespace
 	// (tools/make_test_assets.py writes it). Falls back to the vanilla slate.
 	constexpr const char* kIniPath = "Data\\SFSE\\Plugins\\PhoneTest.ini";
 
-	// screen_rotate=0|90|180|270 and screen_mirror=0|1 in PhoneTest.ini: how the upright UI maps onto the texture.
+	// screen_rotate=0|90|180|270, screen_mirror=0|1 and screen_aspect=<visible height / width> in PhoneTest.ini:
+	// how the upright UI maps onto the texture.
 	// Re-read on every open, so they can be changed while the game runs.
 	void LoadScreenOptions()
 	{
@@ -103,18 +104,22 @@ namespace
 		std::string   line;
 		int           rotate = 0;
 		bool          mirror = false;
+		float         aspect = 1.0f;
 		while (std::getline(in, line)) {
-			if (!line.empty() && line.back() == '') {
+			if (!line.empty() && line.back() == '
+') {
 				line.pop_back();
 			}
 			if (line.rfind("screen_rotate=", 0) == 0) {
 				rotate = std::atoi(line.c_str() + 14);
 			} else if (line.rfind("screen_mirror=", 0) == 0) {
 				mirror = std::atoi(line.c_str() + 14) != 0;
+			} else if (line.rfind("screen_aspect=", 0) == 0) {
+				aspect = static_cast<float>(std::atof(line.c_str() + 14));
 			}
 		}
-		Ui::SetOrientation(rotate, mirror);
-		REX::INFO("screen: rotate {} mirror {}", rotate, mirror);
+		Ui::SetOrientation(rotate, mirror, aspect);
+		REX::INFO("screen: rotate {} mirror {} aspect {:.3f}", rotate, mirror, aspect);
 	}
 
 	std::vector<std::string> LoadModels()

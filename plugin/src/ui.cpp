@@ -247,6 +247,7 @@ namespace
 		float         hour = 12.0f;
 		int           rotate = 0;
 		bool          mirror = false;
+		float         aspect = 1.0f;  // visible screen height / width (upright)
 	};
 
 	std::mutex g_lock;
@@ -264,36 +265,43 @@ namespace
 		char      clock[16];
 		std::snprintf(clock, sizeof(clock), "%02d:%02d", hh, mm);
 
-		const bool landscape = c.w > c.h;
-		const int  pad = 22;
+		// everything scales with the canvas (its aspect follows the physical screen, see screen_aspect)
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = int(W * 0.045f);
 
 		// status bar: time left, network + battery right
-		Text(c, pad, 12, clock, 26, white);
-		const char* net = "星联";
-		const int   batW = 40, batH = 18, batX = c.w - pad - batW, batY = 20;
+		const float sbFont = std::max(16.0f, H * 0.045f);
+		const int   sbY = int(H * 0.018f);
+		Text(c, pad, sbY, clock, sbFont, white);
+		const int batH = int(sbFont * 0.7f), batW = int(batH * 2.2f);
+		const int batX = c.w - pad - batW - 4, batY = sbY + int(sbFont * 0.2f);
 		RoundRect(c, batX, batY, batW, batH, 4, { 230, 230, 230 }, { 200, 200, 200 });
 		RoundRect(c, batX + 3, batY + 3, batW - 6, batH - 6, 2, { 52, 199, 89 }, { 40, 170, 75 });
-		RoundRect(c, batX + batW, batY + 5, 4, batH - 10, 1, { 230, 230, 230 }, { 230, 230, 230 });
+		RoundRect(c, batX + batW, batY + batH / 4, 4, batH / 2, 1, { 230, 230, 230 }, { 230, 230, 230 });
+		const int barsX = batX - int(sbFont * 2.0f);
 		for (int i = 0; i < 4; ++i) {  // signal bars
-			const int bh = 6 + i * 4;
-			RoundRect(c, batX - 70 + i * 8, batY + batH - bh, 5, bh, 1, white, white);
+			const int bh = int(batH * (0.35f + 0.22f * i));
+			RoundRect(c, barsX + i * int(sbFont * 0.35f), batY + batH - bh, std::max(3, int(sbFont * 0.2f)), bh, 1, white, white);
 		}
-		Text(c, batX - 70 - TextWidth(net, 22) - 8, 14, net, 22, white, 0.9f);
+		const char* net = "星联";
+		Text(c, barsX - TextWidth(net, sbFont * 0.85f) - int(sbFont * 0.4f), sbY + int(sbFont * 0.08f), net, sbFont * 0.85f, white, 0.9f);
 
 		// big clock + date
-		const int clockY = landscape ? 60 : 120;
-		TextCentered(c, c.w / 2, clockY, clock, landscape ? 84.0f : 110.0f, white);
+		const float clockFont = std::min(H * 0.2f, W * 0.3f);
+		const int   clockY = int(H * 0.1f);
+		TextCentered(c, c.w / 2, clockY, clock, clockFont, white);
 		char date[64];
 		std::snprintf(date, sizeof(date), "%u年%u月%u日", s.year, s.month + 1, s.day);
-		TextCentered(c, c.w / 2, clockY + (landscape ? 96 : 128), date, 30, { 210, 220, 240 });
+		TextCentered(c, c.w / 2, clockY + int(clockFont * 1.05f), date, std::max(14.0f, H * 0.05f), { 210, 220, 240 });
 
-		// app grid
-		const int cols = landscape ? 8 : 4;
-		const int icon = landscape ? 70 : 88;
-		const int cellW = (c.w - 2 * pad) / cols;
-		const int rows = int((std::size(kApps) + cols - 1) / cols);
-		const int cellH = icon + 44;
-		const int gridY = landscape ? c.h - rows * cellH - 40 : c.h - rows * cellH - 120;
+		// app grid (lower part)
+		const int   cols = W > H * 1.3f ? 8 : 4;
+		const int   rows = int((std::size(kApps) + cols - 1) / cols);
+		const int   cellW = (c.w - 2 * pad) / cols;
+		const float labelFont = std::max(12.0f, H * 0.04f);
+		const int   icon = int(std::min(cellW * 0.72f, H * 0.15f));
+		const int   cellH = icon + int(labelFont * 1.7f);
+		const int   gridY = c.h - rows * cellH - int(H * 0.06f);
 		for (std::size_t i = 0; i < std::size(kApps); ++i) {
 			const auto& a = kApps[i];
 			const int   col = int(i) % cols, row = int(i) / cols;
@@ -301,11 +309,12 @@ namespace
 			const int   y = gridY + row * cellH;
 			RoundRect(c, cx - icon / 2, y, icon, icon, icon / 4, a.top, a.bottom);
 			TextCentered(c, cx, y + icon / 2 - int(icon * 0.27f), a.glyph, icon * 0.5f, white);
-			TextCentered(c, cx, y + icon + 8, a.label, 22, white, 0.95f);
+			TextCentered(c, cx, y + icon + int(labelFont * 0.25f), a.label, labelFont, white, 0.95f);
 		}
 
 		// home indicator
-		RoundRect(c, c.w / 2 - 70, c.h - 26, 140, 8, 4, white, white, 0.8f);
+		const int ind = int(W * 0.28f);
+		RoundRect(c, c.w / 2 - ind / 2, c.h - int(H * 0.03f) - 4, ind, std::max(4, int(H * 0.009f)), 3, white, white, 0.8f);
 	}
 }
 
@@ -327,11 +336,12 @@ namespace Ui
 		g_state.hour = a_hour;
 	}
 
-	void SetOrientation(int a_rotateDeg, bool a_mirror)
+	void SetOrientation(int a_rotateDeg, bool a_mirror, float a_aspect)
 	{
 		std::lock_guard lk(g_lock);
 		g_state.rotate = ((a_rotateDeg % 360) + 360) % 360 / 90 * 90;
 		g_state.mirror = a_mirror;
+		g_state.aspect = std::clamp(a_aspect, 0.2f, 5.0f);
 	}
 
 	bool Render(std::uint8_t* a_dst, std::uint32_t a_pitch, std::uint32_t a_width, std::uint32_t a_height)
@@ -342,31 +352,44 @@ namespace Ui
 		std::lock_guard lk(g_lock);
 		const State s = g_state;
 		const bool  sideways = s.rotate == 90 || s.rotate == 270;
-		const int   cw = sideways ? int(a_height) : int(a_width);
-		const int   ch = sideways ? int(a_width) : int(a_height);
+		// the upright view spans the texture's width (or height when sideways); its height follows the aspect
+		const int   tw = sideways ? int(a_height) : int(a_width);  // upright width in texture pixels
+		const int   th = sideways ? int(a_width) : int(a_height);  // upright height in texture pixels
+		const int   cw = tw;
+		const int   ch = std::max(16, int(std::lround(cw * s.aspect)));
 		const int   minute = int(s.hour * 60.0f);
-		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.rotate != g_drawn.rotate ||
-			s.mirror != g_drawn.mirror || s.day != g_drawn.day) {
+		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day) {
 			g_canvas.Resize(cw, ch);
 			DrawHome(g_canvas, s);
-			g_drawn = s;
 			g_drawnMinute = minute;
 		}
-		// texture pixel (tx, ty) shows canvas pixel (cx, cy)
+		g_drawn = s;
+		const float sy = float(ch) / float(th);  // canvas rows per upright texture row
 		for (std::uint32_t ty = 0; ty < a_height; ++ty) {
 			auto* row = a_dst + std::size_t(ty) * a_pitch;
 			for (std::uint32_t tx = 0; tx < a_width; ++tx) {
-				int cx, cy;
+				// texture pixel -> upright position (ux, uy) in texture-pixel units
+				int ux, uy;
 				switch (s.rotate) {
-				case 90: cx = int(ty), cy = int(a_width - 1 - tx); break;
-				case 180: cx = int(a_width - 1 - tx), cy = int(a_height - 1 - ty); break;
-				case 270: cx = int(a_height - 1 - ty), cy = int(tx); break;
-				default: cx = int(tx), cy = int(ty); break;
+				case 90: ux = int(ty), uy = int(a_width - 1 - tx); break;
+				case 180: ux = int(a_width - 1 - tx), uy = int(a_height - 1 - ty); break;
+				case 270: ux = int(a_height - 1 - ty), uy = int(tx); break;
+				default: ux = int(tx), uy = int(ty); break;
 				}
 				if (s.mirror) {
-					cx = cw - 1 - cx;
+					ux = tw - 1 - ux;
 				}
-				std::memcpy(row + std::size_t(tx) * 4, &g_canvas.px[(std::size_t(cy) * cw + cx) * 4], 4);
+				// vertical resample with linear filtering (horizontal is 1:1)
+				const float fy = std::clamp((uy + 0.5f) * sy - 0.5f, 0.0f, float(ch - 1));
+				const int   y0 = int(fy), y1 = std::min(y0 + 1, ch - 1);
+				const float t = fy - float(y0);
+				const auto* a = &g_canvas.px[(std::size_t(y0) * cw + ux) * 4];
+				const auto* b = &g_canvas.px[(std::size_t(y1) * cw + ux) * 4];
+				auto*       d = row + std::size_t(tx) * 4;
+				d[0] = std::uint8_t(a[0] + (b[0] - a[0]) * t);
+				d[1] = std::uint8_t(a[1] + (b[1] - a[1]) * t);
+				d[2] = std::uint8_t(a[2] + (b[2] - a[2]) * t);
+				d[3] = 255;
 			}
 		}
 		return true;

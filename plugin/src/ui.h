@@ -14,8 +14,9 @@ namespace Ui
 	// In-game calendar, shown in the status bar and the big clock. a_month is the game's 0-based month.
 	void SetGameTime(std::uint32_t a_year, std::uint32_t a_month, std::uint32_t a_day, float a_hour);
 
-	// How the logical (upright) screen maps onto the texture: rotation in degrees (0/90/180/270) and a mirror.
-	void SetOrientation(int a_rotateDeg, bool a_mirror);
+	// How the logical (upright) screen maps onto the texture: rotation in degrees (0/90/180/270), a mirror, and the
+	// visible screen's height / width (the UI is drawn at that aspect, then stretched over the whole texture).
+	void SetOrientation(int a_rotateDeg, bool a_mirror, float a_aspect);
 
 	// Write the current frame into an R8G8B8A8 texture-sized buffer (a_pitch bytes per row).
 	// Returns false if the UI is not ready (no font).
