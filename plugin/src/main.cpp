@@ -24,11 +24,13 @@
 #include "pch.h"
 #include "screen.h"
 #include "tuner.h"
+#include "ui.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -92,6 +94,28 @@ namespace
 	// Model list for F11: Data\SFSE\Plugins\PhoneTest.ini, "model=<path under Meshes>" lines, re-read on every press
 	// (tools/make_test_assets.py writes it). Falls back to the vanilla slate.
 	constexpr const char* kIniPath = "Data\\SFSE\\Plugins\\PhoneTest.ini";
+
+	// screen_rotate=0|90|180|270 and screen_mirror=0|1 in PhoneTest.ini: how the upright UI maps onto the texture.
+	// Re-read on every open, so they can be changed while the game runs.
+	void LoadScreenOptions()
+	{
+		std::ifstream in(kIniPath);
+		std::string   line;
+		int           rotate = 0;
+		bool          mirror = false;
+		while (std::getline(in, line)) {
+			if (!line.empty() && line.back() == '') {
+				line.pop_back();
+			}
+			if (line.rfind("screen_rotate=", 0) == 0) {
+				rotate = std::atoi(line.c_str() + 14);
+			} else if (line.rfind("screen_mirror=", 0) == 0) {
+				mirror = std::atoi(line.c_str() + 14) != 0;
+			}
+		}
+		Ui::SetOrientation(rotate, mirror);
+		REX::INFO("screen: rotate {} mirror {}", rotate, mirror);
+	}
 
 	std::vector<std::string> LoadModels()
 	{
@@ -191,6 +215,9 @@ namespace
 		REX::INFO("{} ({:08X}) -> PerformAction returned {}", a_b.name, a_b.formID, ok);
 		if (ok) {
 			g_open = a_b.formID == 0x0001901F;
+			if (g_open) {
+				LoadScreenOptions();
+			}
 			Screen::SetActive(g_open);
 		}
 	}
@@ -221,6 +248,15 @@ namespace
 		}
 
 		Tuner::Tick(g_open);
+
+		// in-game calendar for the home screen, twice a second
+		static auto nextTime = std::chrono::steady_clock::now();
+		if (g_open && std::chrono::steady_clock::now() >= nextTime) {
+			nextTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+			if (auto* cal = RE::Calendar::GetSingleton()) {
+				Ui::SetGameTime(cal->GetYear(), cal->GetMonth(), cal->GetDay(), cal->GetHour());
+			}
+		}
 	}
 
 	void OnMessage(SFSE::MessagingInterface::Message* a_msg)
@@ -246,6 +282,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
 	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 64 });
 	REX::INFO("PhoneTest loaded; PerformAction ptr at Starfield.exe+0x{:X}", kPerformActionPtr.offset());
+	Ui::Init([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Screen::Install(kScreenWidth, kScreenHeight, [](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Tuner::Install();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {

@@ -7,6 +7,7 @@
 // This file does not use CommonLibSF so that <windows.h> and <d3d12.h> can be included normally.
 
 #include "screen.h"
+#include "ui.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -286,7 +287,10 @@ namespace
 				const int s = g_w.slot;
 				if (g_w.fence->GetCompletedValue() >= g_w.fenceValue[s]) {
 					last = now;
-					FillPattern(g_w.mapped[s], frame++);
+					if (!Ui::Render(g_w.mapped[s], g_w.footprint.Footprint.RowPitch, g_width, g_height)) {
+						FillPattern(g_w.mapped[s], frame);  // no font: test pattern
+					}
+					++frame;
 
 					g_w.alloc[s]->Reset();
 					g_w.list->Reset(g_w.alloc[s], nullptr);

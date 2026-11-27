@@ -9,6 +9,8 @@ set_warnings("allextra")
 
 add_rules("mode.debug", "mode.releasedbg")
 
+add_requires("stb")  -- stb_truetype for the home screen text
+
 target("PhoneTest")
     add_rules("commonlibsf.plugin", {
         name = "PhoneTest",
@@ -19,3 +21,5 @@ target("PhoneTest")
     add_includedirs("src")
     -- no precompiled header: screen.cpp includes <windows.h>/<d3d12.h> without CommonLibSF
     add_syslinks("d3d12")
+    add_packages("stb")
+    add_cxflags("/utf-8")  -- UTF-8 source (Chinese UI strings)

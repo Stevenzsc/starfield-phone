@@ -254,6 +254,8 @@ def main():
         rel = f"{NIF_DIR}\\AnimObjectPhone_g_{name}.nif"
         write(os.path.join(root, "Meshes", rel), make_nif(src_nif, rot, trans, post))
         ini.append(f"model={rel}")
+    # how the upright home screen maps onto the texture; change in game and re-open (F8, F7) to try values
+    ini += ["screen_rotate=0", "screen_mirror=0"]
     write(os.path.join(root, "SFSE", "Plugins", "PhoneTest.ini"), ("\n".join(ini) + "\n").encode())
 
 
