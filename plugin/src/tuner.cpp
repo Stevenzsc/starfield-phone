@@ -11,6 +11,8 @@
 #include "tuner.h"
 
 #include <array>
+#include <atomic>
+#include <string>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -150,9 +152,12 @@ namespace
 	std::mutex                    g_captureLock;
 	RE::NiPointer<RE::NiAVObject> g_captured;  // newest attached object with our root name
 
+	std::atomic_uint32_t g_attachCalls{ 0 };
+
 	bool Attach_Hook(void* a_ctx, void** a_model)
 	{
 		const bool result = g_attachOrig(a_ctx, a_model);
+		++g_attachCalls;
 		if (a_model && *a_model) {
 			auto*       obj = static_cast<RE::NiAVObject*>(*a_model);
 			const char* n = obj->name.c_str();
@@ -164,27 +169,124 @@ namespace
 		return result;
 	}
 
-	// take the newest captured object (if it is a new one) and remember its children's NIF transforms
-	void Adopt()
+	// ---- engine-layout helpers (CommonLibSF's NiNode::children and GetObjectByName slot are wrong for 1.16.244:
+	// a scene dump through NiNode::children crashed, and searching through RE::NiAVObject::GetObjectByName found
+	// nothing). The engine calls GetObjectByName through vtable +0x1F0 (FUN_14219B940, FUN_14034D400). ----
+	RE::NiAVObject* const* Children(RE::NiAVObject* a_obj, std::uint16_t& a_count)
 	{
-		RE::NiPointer<RE::NiAVObject> cap;
+		const auto base = reinterpret_cast<std::uintptr_t>(a_obj);
+		a_count = *reinterpret_cast<const std::uint16_t*>(base + 0x142);
+		return *reinterpret_cast<RE::NiAVObject* const* const*>(base + 0x138);
+	}
+
+	RE::NiAVObject* FindByName(RE::NiAVObject* a_root, const RE::BSFixedString& a_name)
+	{
+		using fn_t = RE::NiAVObject* (*)(RE::NiAVObject*, const RE::BSFixedString*);
+		auto** vtbl = *reinterpret_cast<void***>(a_root);
+		return reinterpret_cast<fn_t>(vtbl[0x1F0 / 8])(a_root, &a_name);
+	}
+
+	RE::NiAVObject* TopOf(RE::NiAVObject* a_obj)
+	{
+		for (int depth = 0; a_obj && a_obj->parent && depth < 64; ++depth) {
+			a_obj = a_obj->parent;
+		}
+		return a_obj;
+	}
+
+	RE::NiAVObject* Player3D()
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			return nullptr;
+		}
+		const auto  guard = player->loadedData.LockRead();
+		const auto* data = *guard;
+		return data && data->data3D ? data->data3D.get() : nullptr;
+	}
+
+	const char* NameOf(RE::NiAVObject* a_obj)
+	{
+		const char* n = a_obj ? a_obj->name.c_str() : nullptr;
+		return n && *n ? n : "(unnamed)";
+	}
+
+	void LogTree(const char* a_label, RE::NiAVObject* a_top)
+	{
+		if (!a_top) {
+			REX::INFO("tuner: {}: none", a_label);
+			return;
+		}
+		std::uint16_t count = 0;
+		auto* const*  kids = Children(a_top, count);
+		std::string   names;
+		for (std::uint16_t i = 0; kids && i < count && i < 40; ++i) {
+			names += ' ';
+			names += NameOf(kids[i]);
+		}
+		REX::INFO("tuner: {}: top '{}' children[{}]:{}", a_label, NameOf(a_top), count, names);
+	}
+
+	std::chrono::steady_clock::time_point g_nextSearch{};
+	bool                                  g_loggedTrees = false;
+
+	// object to tune: the one captured in the attach hook, or else search the scenes by name
+	RE::NiAVObject* Locate(const char*& a_via)
+	{
 		{
 			std::lock_guard lk(g_captureLock);
-			cap = g_captured;
+			if (g_captured && g_captured->parent) {
+				a_via = "attach hook";
+				return g_captured.get();
+			}
 		}
-		// skip the same object, and a stale one from an earlier open that is already detached
-		if (!cap || cap.get() == g_root.get() || !cap->parent) {
+		const auto now = std::chrono::steady_clock::now();
+		if (now < g_nextSearch) {
+			return nullptr;
+		}
+		g_nextSearch = now + std::chrono::milliseconds(500);
+		const RE::BSFixedString name{ kRootName };
+		auto* p3d = Player3D();
+		auto* cam = CameraRoot();
+		struct Start
+		{
+			const char*     label;
+			RE::NiAVObject* obj;
+		};
+		const Start starts[] = { { "player 3D scene top", TopOf(p3d) }, { "camera root scene top", TopOf(cam) } };
+		for (const auto& st : starts) {
+			if (st.obj) {
+				if (auto* f = FindByName(st.obj, name)) {
+					a_via = st.label;
+					return f;
+				}
+			}
+		}
+		if (!g_loggedTrees) {
+			g_loggedTrees = true;
+			REX::INFO("tuner: '{}' not found (attach hook calls so far: {}); scene roots:", kRootName, g_attachCalls.load());
+			LogTree("player 3D scene top", TopOf(p3d));
+			LogTree("camera root scene top", TopOf(cam));
+		}
+		return nullptr;
+	}
+
+	// adopt a new object and remember its children's NIF transforms
+	void Adopt()
+	{
+		const char* via = "";
+		auto*       obj = Locate(via);
+		if (!obj || obj == g_root.get()) {
 			return;
 		}
 		Release();
-		const auto base = reinterpret_cast<std::uintptr_t>(cap.get());
-		auto* const* kids = *reinterpret_cast<RE::NiAVObject* const* const*>(base + 0x138);
-		const auto   count = *reinterpret_cast<const std::uint16_t*>(base + 0x142);
+		std::uint16_t count = 0;
+		auto* const*  kids = Children(obj, count);
 		if (!kids || count == 0 || count > 64) {
-			REX::WARN("tuner: captured '{}' but its children look wrong (count {})", kRootName, count);
+			REX::WARN("tuner: found '{}' via {} but its children look wrong (count {})", kRootName, via, count);
 			return;
 		}
-		g_root = cap;
+		g_root = RE::NiPointer<RE::NiAVObject>(obj);
 		for (std::uint16_t i = 0; i < count; ++i) {
 			if (auto* c = kids[i]) {
 				g_children.push_back(c);
@@ -192,7 +294,7 @@ namespace
 			}
 		}
 		const auto& t = g_root->world.translate;
-		REX::INFO("tuner: captured '{}' with {} children, world pos ({:.2f}, {:.2f}, {:.2f})", kRootName, g_children.size(), t.x, t.y, t.z);
+		REX::INFO("tuner: found '{}' via {} with {} children, world pos ({:.2f}, {:.2f}, {:.2f})", kRootName, via, g_children.size(), t.x, t.y, t.z);
 	}
 
 	// Camera-relative axes (right, up, forward) in world space, picked from the camera's own axes so they don't
