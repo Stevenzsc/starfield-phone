@@ -18,6 +18,9 @@
 // (F9 is the game's quickload key; F5 quicksave. Don't bind those.)
 // Results go to Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log.
 
+#include "pch.h"
+#include "screen.h"
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -74,8 +77,13 @@ namespace
 
 	constexpr int           kCycleKey = 0x7A;  // F11
 	constexpr std::uint32_t kSlateANIO = 0x0005AFB8;  // AnimObjectDataSlate
-	constexpr std::array<const char*, 5> kModels{ {
+	// Screen test texture (tools/make_test_assets.py): Textures\PhoneTest\PhoneScreenTest.dds
+	constexpr std::uint32_t kScreenWidth = 504;
+	constexpr std::uint32_t kScreenHeight = 888;
+
+	constexpr std::array<const char*, 6> kModels{ {
 		"AnimObjects\\AnimObjectDataSlate.nif",  // vanilla
+		"AnimObjects\\PhoneTest\\AnimObjectPhoneTest.nif",  // vanilla slate, all materials -> PhoneScreenTest.mat
 		"AnimObjects\\AnimObjectVideoGrendel.nif",
 		"AnimObjects\\AnimObjectTechReader01.nif",
 		"AnimObjects\\AnimObjectIDCard.nif",
@@ -125,6 +133,9 @@ namespace
 
 		const bool ok = fn(&data);
 		REX::INFO("{} ({:08X}) -> PerformAction returned {}", a_b.name, a_b.formID, ok);
+		if (ok) {
+			Screen::SetActive(a_b.formID == 0x0001901F);
+		}
 	}
 
 	// Runs on the game's task queue: poll the hotkeys, act on key-down edges.
@@ -169,6 +180,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
 	SFSE::Init(a_sfse);
 	REX::INFO("PhoneTest loaded; PerformAction ptr at Starfield.exe+0x{:X}", kPerformActionPtr.offset());
+	Screen::Install(kScreenWidth, kScreenHeight, [](const char* a_msg) { REX::INFO("{}", a_msg); });
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {
 		REX::ERROR("could not register for SFSE messages");
 	}

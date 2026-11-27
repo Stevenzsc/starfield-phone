@@ -17,4 +17,5 @@ target("PhoneTest")
     })
     add_files("src/**.cpp")
     add_includedirs("src")
-    set_pcxxheader("src/pch.h")
+    -- no precompiled header: screen.cpp includes <windows.h>/<d3d12.h> without CommonLibSF
+    add_syslinks("d3d12")
