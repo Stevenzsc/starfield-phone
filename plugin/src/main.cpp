@@ -106,8 +106,7 @@ namespace
 		bool          mirror = false;
 		float         aspect = 1.0f;
 		while (std::getline(in, line)) {
-			if (!line.empty() && line.back() == '
-') {
+			if (!line.empty() && line.back() == '\r') {
 				line.pop_back();
 			}
 			if (line.rfind("screen_rotate=", 0) == 0) {
