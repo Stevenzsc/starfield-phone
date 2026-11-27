@@ -35,6 +35,7 @@
 #include <deque>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int a_vkey);
@@ -121,6 +122,53 @@ namespace
 		REX::INFO("screen: rotate {} mirror {} aspect {:.3f}", rotate, mirror, aspect);
 	}
 
+	// brightness=<30..100> and open_key=<index into Ui's open-key choices> in PhoneTest.ini (Settings app)
+	void LoadSettings()
+	{
+		std::ifstream in(kIniPath);
+		std::string   line;
+		Ui::Settings  st;
+		while (std::getline(in, line)) {
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
+			}
+			if (line.rfind("brightness=", 0) == 0) {
+				st.brightness = std::atoi(line.c_str() + 11);
+			} else if (line.rfind("open_key=", 0) == 0) {
+				st.openKey = std::atoi(line.c_str() + 9);
+			}
+		}
+		Ui::SetSettings(st);
+		const auto now = Ui::GetSettings();
+		REX::INFO("settings: brightness {}% open key {}", now.brightness, Ui::OpenKeyName(now.openKey));
+	}
+
+	// rewrite the settings lines of the ini, keeping every other line
+	void SaveSettings()
+	{
+		const auto               st = Ui::GetSettings();
+		std::vector<std::string> lines;
+		{
+			std::ifstream in(kIniPath);
+			std::string   line;
+			while (std::getline(in, line)) {
+				if (!line.empty() && line.back() == '\r') {
+					line.pop_back();
+				}
+				if (line.rfind("brightness=", 0) != 0 && line.rfind("open_key=", 0) != 0) {
+					lines.push_back(line);
+				}
+			}
+		}
+		lines.push_back("brightness=" + std::to_string(st.brightness));
+		lines.push_back("open_key=" + std::to_string(st.openKey));
+		std::ofstream out(kIniPath, std::ios::trunc);
+		for (const auto& l : lines) {
+			out << l << '\n';
+		}
+		REX::INFO("settings saved: brightness {}% open key {}", st.brightness, Ui::OpenKeyName(st.openKey));
+	}
+
 	std::vector<std::string> LoadModels()
 	{
 		std::vector<std::string> models;
@@ -145,6 +193,10 @@ namespace
 	std::size_t                        g_model = 0;
 	std::atomic_bool                   g_ready{ false };
 	bool                               g_open = false;
+	bool                               g_preloaded = false;  // current model shown once (see QueuePreloadOpen)
+	bool                               g_openKeyDown = false;
+	std::array<bool, 6>                g_navDown{};
+	constexpr std::size_t              kStepPhotoMode = 99;  // Step::binding value: open the game's photo mode
 
 	// Timed follow-up actions (preload: a model that is not loaded yet is missing on its first open, so after a
 	// model change we open, close and open again).
@@ -190,6 +242,7 @@ namespace
 		REX::INFO("cycle: model {}/{} '{}' -> '{}'", g_model + 1, models.size(), before, anio->model.c_str());
 		Screen::SetMarker(static_cast<std::uint32_t>(g_model + 1));
 		QueuePreloadOpen();
+		g_preloaded = true;
 	}
 
 	void Perform(const Binding& a_b)
@@ -221,9 +274,44 @@ namespace
 			g_open = a_b.formID == 0x0001901F;
 			if (g_open) {
 				LoadScreenOptions();
+				Ui::OnOpen();
 			}
 			Screen::SetActive(g_open);
 		}
+	}
+
+	void OpenPhotoMode()
+	{
+		auto* q = RE::UIMessageQueue::GetSingleton();
+		if (!q) {
+			REX::WARN("camera: no UIMessageQueue");
+			return;
+		}
+		const auto r = q->AddMessage(RE::BSFixedString{ "PhotoModeMenu" }, RE::UI_MESSAGE_TYPE::kShow);
+		REX::INFO("camera: PhotoModeMenu show -> {}", r);
+	}
+
+	// start with the first phone model of the ini (line 2; line 1 is the vanilla slate)
+	void UseDefaultModel()
+	{
+		const auto models = LoadModels();
+		if (models.size() < 2) {
+			return;
+		}
+		if (auto* anio = RE::TESForm::LookupByID<RE::TESObjectANIO>(kSlateANIO)) {
+			g_model = 1;
+			anio->model = models[1].c_str();
+			Screen::SetMarker(2);
+			REX::INFO("model: using '{}'", models[1]);
+		}
+	}
+
+	bool KeyEdge(int a_vk, bool& a_wasDown)
+	{
+		const bool down = (GetAsyncKeyState(a_vk) & 0x8000) != 0;
+		const bool edge = down && !a_wasDown;
+		a_wasDown = down;
+		return edge;
 	}
 
 	// Runs on the game's task queue: poll the hotkeys, act on key-down edges.
@@ -232,12 +320,48 @@ namespace
 		if (!g_ready.load()) {
 			return;
 		}
-		for (std::size_t i = 0; i < kBindings.size(); ++i) {
-			const bool down = (GetAsyncKeyState(kBindings[i].vkey) & 0x8000) != 0;
-			if (down && !g_down[i]) {
-				Perform(kBindings[i]);
+		// open key (Settings app; default F7) toggles the phone; F8 also puts it away
+		if (KeyEdge(Ui::OpenKeyVk(Ui::GetSettings().openKey), g_openKeyDown) && g_steps.empty()) {
+			if (g_open) {
+				Perform(kBindings[1]);
+			} else if (!g_preloaded) {
+				QueuePreloadOpen();  // first open of this model shows nothing; open, close, open
+				g_preloaded = true;
+			} else {
+				Perform(kBindings[0]);
 			}
-			g_down[i] = down;
+		}
+		if (KeyEdge(kBindings[1].vkey, g_down[1]) && g_open) {
+			Perform(kBindings[1]);
+		}
+
+		// phone navigation: arrows, Enter, Backspace (unbound in the game by default)
+		if (g_open && g_steps.empty()) {
+			constexpr std::pair<int, Ui::Key> nav[] = {
+				{ 0x26, Ui::Key::kUp }, { 0x28, Ui::Key::kDown }, { 0x25, Ui::Key::kLeft },
+				{ 0x27, Ui::Key::kRight }, { 0x0D, Ui::Key::kEnter }, { 0x08, Ui::Key::kBack },
+			};
+			for (std::size_t i = 0; i < std::size(nav); ++i) {
+				if (!KeyEdge(nav[i].first, g_navDown[i])) {
+					continue;
+				}
+				switch (Ui::Input(nav[i].second)) {
+				case Ui::Action::kSettingsChanged:
+					SaveSettings();
+					break;
+				case Ui::Action::kOpenPhotoMode:
+					// put the phone away, then open photo mode once the hand is down
+					Perform(kBindings[1]);
+					g_steps.push_back({ std::chrono::steady_clock::now() + std::chrono::milliseconds(1500), kStepPhotoMode });
+					break;
+				default:
+					break;
+				}
+			}
+		} else {
+			for (auto& d : g_navDown) {
+				d = false;
+			}
 		}
 		const bool cycle = (GetAsyncKeyState(kCycleKey) & 0x8000) != 0;
 		if (cycle && !g_cycleDown) {
@@ -248,7 +372,11 @@ namespace
 		if (!g_steps.empty() && std::chrono::steady_clock::now() >= g_steps.front().at) {
 			const auto b = g_steps.front().binding;
 			g_steps.pop_front();
-			Perform(kBindings[b]);
+			if (b == kStepPhotoMode) {
+				OpenPhotoMode();
+			} else {
+				Perform(kBindings[b]);
+			}
 		}
 
 		Tuner::Tick(g_open);
@@ -272,9 +400,12 @@ namespace
 		if (a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
 			if (const auto* tasks = SFSE::GetTaskInterface()) {
 				Tuner::Load();
+				LoadSettings();
+				UseDefaultModel();
 				tasks->AddPermanentTask([]() { Tick(); });
 				g_ready = true;
-				REX::INFO("hotkey task installed (F7 slate open, F8 slate close, F11 cycle slate model)");
+				REX::INFO("hotkey task installed (open key {} toggles the phone, F8 puts it away, F11 cycles the model)",
+					Ui::OpenKeyName(Ui::GetSettings().openKey));
 			} else {
 				REX::ERROR("no task interface; hotkeys disabled");
 			}

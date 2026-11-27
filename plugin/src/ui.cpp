@@ -248,12 +248,53 @@ namespace
 		int           rotate = 0;
 		bool          mirror = false;
 		float         aspect = 1.0f;  // visible screen height / width (upright)
+		// navigation
+		int page = 0;      // Page
+		int homeSel = 0;   // selected app on the home screen
+		int setSel = 0;    // selected row in Settings
+		int openedApp = 0; // app whose page is shown (for placeholder titles)
+		// settings
+		int brightness = 100;
+		int openKey = 0;
 	};
+
+	enum Page
+	{
+		kHome,
+		kSettingsPage,
+		kQuestsPage,
+		kCameraPage,
+		kPlaceholderPage,
+	};
+
+	// app index -> page (order of kApps)
+	int PageFor(int a_app)
+	{
+		switch (a_app) {
+		case 1: return kQuestsPage;
+		case 5: return kCameraPage;
+		case 7: return kSettingsPage;
+		default: return kPlaceholderPage;
+		}
+	}
+
+	struct OpenKey
+	{
+		int         vk;
+		const char* name;
+	};
+	// numpad keys are taken by the placement tuner; F5 / F9 are quicksave / quickload
+	constexpr OpenKey kOpenKeys[] = {
+		{ 0x76, "F7" }, { 0x75, "F6" }, { 0x79, "F10" }, { 0x2D, "Insert" }, { 0x24, "Home" }, { 0x23, "End" },
+	};
+	constexpr int kSettingsRows = 2;  // brightness, open key
 
 	std::mutex g_lock;
 	State      g_state;     // latest values (guarded)
 	State      g_drawn;     // values the canvas was drawn with
 	int        g_drawnMinute = -1;
+	unsigned   g_version = 1;  // bumped on every navigation / settings change
+	unsigned   g_drawnVersion = 0;
 	Canvas     g_canvas;
 
 	void DrawHome(Canvas& c, const State& s)
@@ -307,6 +348,10 @@ namespace
 			const int   col = int(i) % cols, row = int(i) / cols;
 			const int   cx = pad + col * cellW + cellW / 2;
 			const int   y = gridY + row * cellH;
+			if (int(i) == s.homeSel) {  // selection ring
+				const int ring = std::max(4, icon / 12);
+				RoundRect(c, cx - icon / 2 - ring, y - ring, icon + 2 * ring, icon + 2 * ring, icon / 4 + ring, white, white, 0.55f);
+			}
 			RoundRect(c, cx - icon / 2, y, icon, icon, icon / 4, a.top, a.bottom);
 			TextCentered(c, cx, y + icon / 2 - int(icon * 0.27f), a.glyph, icon * 0.5f, white);
 			TextCentered(c, cx, y + icon + int(labelFont * 0.25f), a.label, labelFont, white, 0.95f);
@@ -315,6 +360,99 @@ namespace
 		// home indicator
 		const int ind = int(W * 0.28f);
 		RoundRect(c, c.w / 2 - ind / 2, c.h - int(H * 0.03f) - 4, ind, std::max(4, int(H * 0.009f)), 3, white, white, 0.8f);
+	}
+
+	// header: back hint + title; returns the y where content starts
+	int DrawHeader(Canvas& c, const char* a_title, Rgb a_accent)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = int(W * 0.045f);
+		const float f = std::max(16.0f, H * 0.045f);
+		Text(c, pad, int(H * 0.03f), "‹ 退格返回", f * 0.8f, { 200, 210, 230 }, 0.9f);
+		const float tf = std::max(20.0f, H * 0.075f);
+		const int   ty = int(H * 0.1f);
+		TextCentered(c, c.w / 2, ty, a_title, tf, { 255, 255, 255 });
+		RoundRect(c, c.w / 2 - int(W * 0.08f), ty + int(tf * 1.2f), int(W * 0.16f), std::max(3, int(H * 0.008f)), 2, a_accent, a_accent);
+		return ty + int(tf * 1.2f) + int(H * 0.05f);
+	}
+
+	void DrawHint(Canvas& c, const char* a_hint)
+	{
+		const float H = float(c.h);
+		TextCentered(c, c.w / 2, c.h - int(H * 0.09f), a_hint, std::max(12.0f, H * 0.036f), { 190, 200, 220 }, 0.85f);
+	}
+
+	void DrawSettings(Canvas& c, const State& s)
+	{
+		const float H = float(c.h), W = float(c.w);
+		int         y = DrawHeader(c, "设置", kApps[7].top);
+		const int   pad = int(W * 0.06f);
+		const int   rowH = int(H * 0.12f);
+		const float f = std::max(14.0f, H * 0.048f);
+		char        bright[16];
+		std::snprintf(bright, sizeof(bright), "%d%%", s.brightness);
+		const char* labels[kSettingsRows] = { "屏幕亮度", "打开手机" };
+		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name };
+		for (int i = 0; i < kSettingsRows; ++i) {
+			const bool sel = i == s.setSel;
+			RoundRect(c, pad, y, c.w - 2 * pad, rowH - int(H * 0.02f), int(H * 0.025f), sel ? Rgb{ 90, 110, 150 } : Rgb{ 40, 52, 82 },
+				sel ? Rgb{ 70, 90, 130 } : Rgb{ 34, 44, 70 }, sel ? 0.95f : 0.8f);
+			const int ty = y + (rowH - int(H * 0.02f)) / 2 - int(f * 0.62f);
+			Text(c, pad + int(W * 0.05f), ty, labels[i], f, { 255, 255, 255 });
+			char val[40];
+			std::snprintf(val, sizeof(val), sel ? "‹ %s ›" : "%s", values[i]);
+			Text(c, c.w - pad - int(W * 0.05f) - TextWidth(val, f), ty, val, f, sel ? Rgb{ 255, 214, 10 } : Rgb{ 220, 230, 245 });
+			y += rowH;
+		}
+		DrawHint(c, "↑↓ 选择   ←→ 调整");
+	}
+
+	void DrawCamera(Canvas& c, const State&)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   y = DrawHeader(c, "相机", kApps[5].top);
+		const int   d = int(std::min(W * 0.38f, H * 0.3f));
+		const int   cy = y + int(H * 0.08f);
+		RoundRect(c, c.w / 2 - d / 2, cy, d, d, d / 2, { 255, 255, 255 }, { 230, 230, 230 });
+		const int in = int(d * 0.8f);
+		RoundRect(c, c.w / 2 - in / 2, cy + (d - in) / 2, in, in, in / 2, { 240, 240, 240 }, { 200, 200, 205 });
+		const float f = std::max(14.0f, H * 0.046f);
+		TextCentered(c, c.w / 2, cy + d + int(H * 0.06f), "回车：进入拍照模式", f, { 255, 255, 255 });
+		TextCentered(c, c.w / 2, cy + d + int(H * 0.06f) + int(f * 1.5f), "手机会先收起", f * 0.8f, { 190, 200, 220 }, 0.9f);
+	}
+
+	void DrawQuests(Canvas& c, const State&)
+	{
+		const float H = float(c.h);
+		const int   y = DrawHeader(c, "任务", kApps[1].top);
+		const float f = std::max(14.0f, H * 0.048f);
+		TextCentered(c, c.w / 2, y + int(H * 0.1f), "任务列表开发中", f, { 255, 255, 255 });
+		TextCentered(c, c.w / 2, y + int(H * 0.1f) + int(f * 1.6f), "下个版本显示当前任务和目标", f * 0.8f, { 190, 200, 220 }, 0.9f);
+	}
+
+	void DrawPlaceholder(Canvas& c, const State& s)
+	{
+		const float H = float(c.h);
+		const int   y = DrawHeader(c, kApps[s.openedApp].label, kApps[s.openedApp].top);
+		TextCentered(c, c.w / 2, y + int(H * 0.12f), "即将推出", std::max(16.0f, H * 0.06f), { 255, 255, 255 });
+	}
+
+	void DrawPage(Canvas& c, const State& s)
+	{
+		if (s.page == kHome) {
+			DrawHome(c, s);
+			return;
+		}
+		FillBackground(c);
+		switch (s.page) {
+		case kSettingsPage: DrawSettings(c, s); break;
+		case kCameraPage: DrawCamera(c, s); break;
+		case kQuestsPage: DrawQuests(c, s); break;
+		default: DrawPlaceholder(c, s); break;
+		}
+		// home indicator
+		const int ind = int(c.w * 0.28f);
+		RoundRect(c, c.w / 2 - ind / 2, c.h - int(c.h * 0.03f) - 4, ind, std::max(4, int(c.h * 0.009f)), 3, { 255, 255, 255 }, { 255, 255, 255 }, 0.8f);
 	}
 }
 
@@ -345,6 +483,101 @@ namespace Ui
 		g_state.aspect = std::clamp(a_aspect, 0.2f, 5.0f);
 	}
 
+	Action Input(Key a_key)
+	{
+		std::lock_guard lk(g_lock);
+		auto&           st = g_state;
+		const int       n = int(std::size(kApps));
+		const int       cols = 4;
+		Action          act = Action::kNone;
+		switch (st.page) {
+		case kHome:
+			switch (a_key) {
+			case Key::kLeft: st.homeSel = (st.homeSel + n - 1) % n; break;
+			case Key::kRight: st.homeSel = (st.homeSel + 1) % n; break;
+			case Key::kUp: st.homeSel = (st.homeSel + n - cols) % n; break;
+			case Key::kDown: st.homeSel = (st.homeSel + cols) % n; break;
+			case Key::kEnter:
+				st.openedApp = st.homeSel;
+				st.page = PageFor(st.homeSel);
+				st.setSel = 0;
+				break;
+			default: return Action::kNone;
+			}
+			break;
+		case kSettingsPage:
+			switch (a_key) {
+			case Key::kUp: st.setSel = (st.setSel + kSettingsRows - 1) % kSettingsRows; break;
+			case Key::kDown: st.setSel = (st.setSel + 1) % kSettingsRows; break;
+			case Key::kLeft:
+			case Key::kRight: {
+				const int dir = a_key == Key::kRight ? 1 : -1;
+				if (st.setSel == 0) {
+					st.brightness = std::clamp(st.brightness + dir * 10, 30, 100);
+				} else {
+					const int k = int(std::size(kOpenKeys));
+					st.openKey = (st.openKey + dir + k) % k;
+				}
+				act = Action::kSettingsChanged;
+				break;
+			}
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		case kCameraPage:
+			if (a_key == Key::kEnter) {
+				act = Action::kOpenPhotoMode;
+			} else if (a_key == Key::kBack) {
+				st.page = kHome;
+			} else {
+				return Action::kNone;
+			}
+			break;
+		default:
+			if (a_key != Key::kBack) {
+				return Action::kNone;
+			}
+			st.page = kHome;
+			break;
+		}
+		++g_version;
+		return act;
+	}
+
+	void OnOpen()
+	{
+		std::lock_guard lk(g_lock);
+		g_state.page = kHome;
+		++g_version;
+	}
+
+	Settings GetSettings()
+	{
+		std::lock_guard lk(g_lock);
+		return { g_state.brightness, g_state.openKey };
+	}
+
+	void SetSettings(const Settings& a_settings)
+	{
+		std::lock_guard lk(g_lock);
+		g_state.brightness = std::clamp(a_settings.brightness, 30, 100);
+		g_state.openKey = std::clamp(a_settings.openKey, 0, int(std::size(kOpenKeys)) - 1);
+		++g_version;
+	}
+
+	int OpenKeyCount() { return int(std::size(kOpenKeys)); }
+
+	int OpenKeyVk(int a_index)
+	{
+		return kOpenKeys[std::clamp(a_index, 0, int(std::size(kOpenKeys)) - 1)].vk;
+	}
+
+	const char* OpenKeyName(int a_index)
+	{
+		return kOpenKeys[std::clamp(a_index, 0, int(std::size(kOpenKeys)) - 1)].name;
+	}
+
 	bool Render(std::uint8_t* a_dst, std::uint32_t a_pitch, std::uint32_t a_width, std::uint32_t a_height)
 	{
 		if (!g_fontOk) {
@@ -359,11 +592,14 @@ namespace Ui
 		const int   cw = tw;
 		const int   ch = std::max(16, int(std::lround(cw * s.aspect)));
 		const int   minute = int(s.hour * 60.0f);
-		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day) {
+		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
+			g_version != g_drawnVersion) {
 			g_canvas.Resize(cw, ch);
-			DrawHome(g_canvas, s);
+			DrawPage(g_canvas, s);
 			g_drawnMinute = minute;
+			g_drawnVersion = g_version;
 		}
+		const float bright = s.brightness / 100.0f;
 		g_drawn = s;
 		const float sy = float(ch) / float(th);  // canvas rows per upright texture row
 		for (std::uint32_t ty = 0; ty < a_height; ++ty) {
@@ -387,9 +623,9 @@ namespace Ui
 				const auto* a = &g_canvas.px[(std::size_t(y0) * cw + ux) * 4];
 				const auto* b = &g_canvas.px[(std::size_t(y1) * cw + ux) * 4];
 				auto*       d = row + std::size_t(tx) * 4;
-				d[0] = std::uint8_t(a[0] + (b[0] - a[0]) * t);
-				d[1] = std::uint8_t(a[1] + (b[1] - a[1]) * t);
-				d[2] = std::uint8_t(a[2] + (b[2] - a[2]) * t);
+				d[0] = std::uint8_t((a[0] + (b[0] - a[0]) * t) * bright);
+				d[1] = std::uint8_t((a[1] + (b[1] - a[1]) * t) * bright);
+				d[2] = std::uint8_t((a[2] + (b[2] - a[2]) * t) * bright);
 				d[3] = 255;
 			}
 		}

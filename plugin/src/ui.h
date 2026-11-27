@@ -18,6 +18,37 @@ namespace Ui
 	// visible screen's height / width (the UI is drawn at that aspect, then stretched over the whole texture).
 	void SetOrientation(int a_rotateDeg, bool a_mirror, float a_aspect);
 
+	// ---- navigation ----
+	enum class Key
+	{
+		kUp,
+		kDown,
+		kLeft,
+		kRight,
+		kEnter,
+		kBack
+	};
+	enum class Action
+	{
+		kNone,
+		kOpenPhotoMode,    // camera app: put the phone away, then open the game's photo mode
+		kSettingsChanged,  // save GetSettings() to the ini
+	};
+	Action Input(Key a_key);  // from the game's task thread while the phone is open
+	void   OnOpen();          // phone taken out: back to the home screen
+
+	// ---- settings (Settings app; saved in PhoneTest.ini) ----
+	struct Settings
+	{
+		int brightness = 100;  // percent, 30..100
+		int openKey = 0;       // index into the open-key choices
+	};
+	Settings    GetSettings();
+	void        SetSettings(const Settings& a_settings);
+	int         OpenKeyCount();
+	int         OpenKeyVk(int a_index);  // Windows virtual-key code
+	const char* OpenKeyName(int a_index);
+
 	// Write the current frame into an R8G8B8A8 texture-sized buffer (a_pitch bytes per row).
 	// Returns false if the UI is not ready (no font).
 	bool Render(std::uint8_t* a_dst, std::uint32_t a_pitch, std::uint32_t a_width, std::uint32_t a_height);
