@@ -33,6 +33,19 @@
 - A truly separate ANIO needs its own `.afx` payload, so its own animation suffix: a new branch in
   `human_1stpersonroot.agx`.
 
+## Screen texture writer (2026-11-27, verified in game)
+
+- Assets from `tools/make_test_assets.py` (copy `data/` into `Starfield\Data`): a 504x888 RGBA8 DDS, a material copied
+  from the vanilla `Dataslatescreen_01.mat` (loose JSON; its own `res:F237F6xx` object IDs renamed), and the vanilla
+  slate NIF with its four material strings pointed at it. Loose `.mat` and NIF files load with `bInvalidateOlderFiles=1`.
+- The game creates the texture with `CreatePlacedResource`, format 27 (`R8G8B8A8_TYPELESS`), 1 mip, a few ms after the
+  open action. It creates a NEW texture on every open (match #1, #2...); the writer follows the newest one.
+- Hooks on the dummy device's vtable catch the game's device and queue (Streamline `sl.interposer.dll` present).
+- With `ALLOW_SIMULTANEOUS_ACCESS` added at creation, a plain `CopyTextureRegion` before the game's command lists,
+  15 times a second, needs no barriers: 332 writes, the pattern animates on the slate in the left hand, no crash.
+- Open points: whole slate uses the screen material (only the test); textures stay AddRef'd until replaced;
+  the material is lit, not emissive, so it is dark in shadow.
+
 ## Test plugin
 
 `plugin/` builds `PhoneTest.dll`: F7/F8 slate open/close, F11 cycles the slate's model, log in
