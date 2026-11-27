@@ -27,21 +27,14 @@ NIF_DIR = "AnimObjects\\PhoneTest"
 # name: (rotation degrees about x, y, z applied in that order, translation x, y, z in NIF units = metres)
 # Round 1 (in game): only ry+90 turns the screen face toward the camera (ry-90 shows the back).
 # Round 2: +0.1 x moved it up and right (behind the fist); -x and +y (0.1) left the view; y-/z were not seen.
-# Round 3: small steps on each axis. The live numpad tuner could not find the node, so placement stays offline.
+# Round 3: small steps per axis looked like rotations (perspective + tilted bone), so placement was tuned live with
+# the plugin's numpad tuner on top of r3_base and saved to tools/placement.txt.
+# Round 4 (in game): the baked placement matched only when written TRANSPOSED: the game's in-memory NiMatrix3 is
+# the transpose of the rotation stored in the NIF file. "v1" is that placement.
 # The plugin draws N white squares on the screen for line N of PhoneTest.ini (1 = vanilla slate).
 RY = (0, 90, 0)
 VARIANTS = {
-    "r3_base": (RY, (0, 0, 0)),
-    "r3_x+02": (RY, (0.02, 0, 0)),
-    "r3_x+04": (RY, (0.04, 0, 0)),
-    "r3_x+06": (RY, (0.06, 0, 0)),
-    "r3_y+02": (RY, (0, 0.02, 0)),
-    "r3_y-02": (RY, (0, -0.02, 0)),
-    "r3_y-04": (RY, (0, -0.04, 0)),
-    "r3_z+02": (RY, (0, 0, 0.02)),
-    "r3_z+04": (RY, (0, 0, 0.04)),
-    "r3_z-02": (RY, (0, 0, -0.02)),
-    "r3_z-04": (RY, (0, 0, -0.04)),
+    "r3_base": (RY, (0, 0, 0)),  # base the tuner offset is relative to (re-tune from here)
 }
 ROOT_NAME = b"PhoneAnimObjectRoot"
 
@@ -205,9 +198,8 @@ def main():
     jobs = []
     placed = placement_post()
     if placed:
-        # tuned placement first (one F11 press reaches it); both matrix conventions, pick the one that matches
-        jobs.append(("v1_placed", RY, (0, 0, 0), (placed[0], placed[1], False)))
-        jobs.append(("v1_placed_T", RY, (0, 0, 0), (placed[0], placed[1], True)))
+        # tuned placement first (one F11 press reaches it); transposed = verified convention (round 4)
+        jobs.append(("v1", RY, (0, 0, 0), (placed[0], placed[1], True)))
     jobs += [(name, rot, trans, None) for name, (rot, trans) in VARIANTS.items()]
     for name, rot, trans, post in jobs:
         # file names change with the transform method: the game caches a loaded NIF by path for the session

@@ -46,6 +46,19 @@
 - Open points: whole slate uses the screen material (only the test); textures stay AddRef'd until replaced;
   the material is lit, not emissive, so it is dark in shadow.
 
+## Placement (2026-11-27, verified in game)
+
+- The live numpad tuner (plugin/src/tuner.cpp) works once it uses the engine's own layout: GetObjectByName is vtable
+  +0x1F0, NiNode children are at +0x138 (data) / +0x142 (uint16 count). CommonLibSF's NiNode::children and
+  GetObjectByName slot are wrong for 1.16.244 (a scene dump through them crashed; the search found nothing).
+- The 1st-person object is found from the top of the player's third-person 3D tree; it hangs on `L_AnimObject1`.
+  Every open attaches a NEW object and the old one can stay under the bone, so the tuner follows the last child
+  with the root name. The attach-call hook (ID 37953 +0x6B0) never fires for it.
+- The engine's AnimObject attach (FUN_14034D400) zeroes only the root's local translation; children keep their
+  NIF transforms in the bone's frame.
+- In-memory NiMatrix3 is the TRANSPOSE of the rotation stored in the NIF file (a baked offset only matched when
+  written transposed). The tuned placement is in tools/placement.txt and baked as AnimObjectPhone_g_v1.nif.
+
 ## Test plugin
 
 `plugin/` builds `PhoneTest.dll`: F7/F8 slate open/close, F11 cycles the slate's model, log in
