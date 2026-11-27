@@ -2,9 +2,12 @@
 
   Textures\\PhoneTest\\PhoneScreenTest.dds   504x888 R8G8B8A8_UNORM, 1 mip, magenta + grid.
                                              The size is unique: the plugin finds the texture by it.
-  Materials\\PhoneTest\\PhoneScreenTest.mat  copy of vanilla Dataslatescreen_01.mat using that texture.
+  Materials\\PhoneTest\\PhoneScreenTest.mat  copy of vanilla Dataslatescreen_01.mat using that texture (lit; unused).
+  Materials\\PhoneTest\\PhoneScreenEmissive.mat
+                                             emissive screen material: ScreenSFSE's ColorEmissive screen material
+                                             (read from the local "ScreenSFSE - Main.ba2") pointed at that texture.
   Meshes\\AnimObjects\\PhoneTest\\AnimObjectPhone_<variant>.nif
-                                             vanilla AnimObjectDataSlate.nif; its screen faces use PhoneScreenTest.mat,
+                                             vanilla AnimObjectDataSlate.nif; its screen faces use PhoneScreenEmissive.mat,
                                              sides and back stay vanilla; the root node gets the variant's rotation
                                              and translation (relative to the L_AnimObject1 bone).
   Data\\SFSE\\Plugins\\PhoneTest.ini       model list for the plugin's F11 key (one model= line per variant).
@@ -21,6 +24,8 @@ W, H = 504, 888
 DXGI_R8G8B8A8_UNORM = 28
 
 MAT_REL = "Materials\\PhoneTest\\PhoneScreenTest.mat"
+EMISSIVE_MAT_REL = "Materials\\PhoneTest\\PhoneScreenEmissive.mat"
+SCREEN_MAT_REL = EMISSIVE_MAT_REL  # what the NIF's screen faces use
 TEX_REL = "Textures\\PhoneTest\\PhoneScreenTest.dds"
 NIF_DIR = "AnimObjects\\PhoneTest"
 
@@ -34,7 +39,7 @@ NIF_DIR = "AnimObjects\\PhoneTest"
 # The plugin draws N white squares on the screen for line N of PhoneTest.ini (1 = vanilla slate).
 RY = (0, 90, 0)
 VARIANTS = {
-    "r3_base": (RY, (0, 0, 0)),  # base the tuner offset is relative to (re-tune from here)
+    "r3e_base": (RY, (0, 0, 0)),  # base the tuner offset is relative to (re-tune from here); emissive screen
 }
 ROOT_NAME = b"PhoneAnimObjectRoot"
 
@@ -73,6 +78,47 @@ def make_mat(game):
     text, n = re.subn(r"res:F237F6([0-9A-F]{2}):0005C4D1:A2C9E9B0", r"res:7E5A11\1:0005C4D1:A2C9E9B0", text)
     print(f"material: {n} object IDs renamed")
     assert "PhoneScreenTest.dds" in text and "PhoneTest\\\\PhoneScreenTest.mat" in text
+    return text.encode("utf-8")
+
+
+def ba2_read(archive, name):
+    """One file from a Starfield GNRL BA2 (v2/v3, zlib)."""
+    import zlib
+    with open(archive, "rb") as f:
+        magic, ver, typ, cnt, nameoff = struct.unpack("<4sI4sIQ", f.read(24))
+        if typ != b"GNRL":
+            raise SystemExit(f"{archive}: not a GNRL archive")
+        if ver >= 2:
+            f.read(8)
+        if ver == 3 and struct.unpack("<I", f.read(4))[0] != 0:
+            raise SystemExit(f"{archive}: only zlib-compressed archives are supported")
+        entries = [struct.unpack("<IIIIQIII", f.read(36)) for _ in range(cnt)]
+        f.seek(nameoff)
+        for e in entries:
+            n = f.read(struct.unpack("<H", f.read(2))[0]).decode("utf-8")
+            if n.lower() == name.lower():
+                off, packed, size = e[4], e[5], e[6]
+                f.seek(off)
+                raw = f.read(packed or size)
+                return zlib.decompress(raw) if packed else raw
+    raise SystemExit(f"{archive}: {name} not found")
+
+
+def make_emissive_mat(game):
+    """ScreenSFSE's emissive screen material (ColorEmissive shader model, proven on its in-world screens) with our
+    texture. Built from the user's own install, never committed (third-party asset)."""
+    text = ba2_read(os.path.join(game, "Data", "ScreenSFSE - Main.ba2"),
+                    "materials/screensfse/screensfse_smallch1.mat").decode("utf-8")
+    esc = lambda p: p.replace("\\", "\\\\")
+    text = text.replace(esc(r"Data\Textures\ScreenSFSE\SmallCh1.dds"), esc("Data\\" + TEX_REL))
+    text = text.replace(esc(r"Materials\ScreenSFSE\ScreenSFSE_SmallCh1.mat"), esc(EMISSIVE_MAT_REL))
+    text = text.replace("ScreenSFSE_SmallCh1", "PhoneScreenEmissive")
+    # this material's own objects: new IDs so they can't clash with ScreenSFSE's
+    text, n = re.subn(r"res:([0-9A-F]{8}):5A57A268:C017515A",
+                      lambda m: "res:%08X:5A57A268:C017515A" % (int(m.group(1), 16) ^ 0x7E5A1100), text)
+    if "PhoneScreenTest.dds" not in text or "ScreenSFSE" in text or n != 10:
+        raise SystemExit(f"emissive material: unexpected template (ids {n})")
+    print(f"emissive material: {n} IDs renamed")
     return text.encode("utf-8")
 
 
@@ -125,7 +171,7 @@ def make_nif(src_nif, rot_deg, trans, post=None):
     out = open(src_nif, "rb").read()
     # header strings are <uint32 len><chars>; nothing points at their byte offsets, so lengths may change.
     # Front face (screen + generated text) -> our material; sides and back stay vanilla.
-    new = MAT_REL.encode()
+    new = SCREEN_MAT_REL.encode()
     for old in (b"Materials\\Items\\DataSlate\\Dataslatescreen_01.mat", b"Materials\\Items\\Dataslate\\DataSlate_TextGen01.mat"):
         needle = struct.pack("<I", len(old)) + old
         if out.count(needle) != 1:
@@ -193,13 +239,15 @@ def main():
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
     write(os.path.join(root, TEX_REL), make_dds())
     write(os.path.join(root, MAT_REL), make_mat(game))
+    write(os.path.join(root, EMISSIVE_MAT_REL), make_emissive_mat(game))
     ini = ["; PhoneTest model list (F11 cycles; re-read on every press). Generated by tools/make_test_assets.py",
            "model=AnimObjects\\AnimObjectDataSlate.nif"]
     jobs = []
     placed = placement_post()
     if placed:
         # tuned placement first (one F11 press reaches it); transposed = verified convention (round 4)
-        jobs.append(("v1", RY, (0, 0, 0), (placed[0], placed[1], True)))
+        # v2 = v1 placement with the emissive screen material (new name: the game caches NIFs by path)
+        jobs.append(("v2", RY, (0, 0, 0), (placed[0], placed[1], True)))
     jobs += [(name, rot, trans, None) for name, (rot, trans) in VARIANTS.items()]
     for name, rot, trans, post in jobs:
         # file names change with the transform method: the game caches a loaded NIF by path for the session
