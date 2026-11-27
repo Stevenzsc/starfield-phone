@@ -12,13 +12,17 @@
 //
 // This plugin does the same from hotkeys:
 //   F7  ActionDataSlateOpen  (0001901F)    F8  ActionDataSlateClose (000222CD)
-//   F9  ActionDigipickRaise  (003A15E3)    F10 ActionDigipickLower  (003A15E4)
+//   F11 cycle the model of AnimObjectDataSlate (ANIO 0005AFB8) through other hand-held meshes, so the next F7
+//       shows a different object. The .afx annotation picks the ANIO by editor ID, so a truly separate ANIO needs
+//       a new 1st-person graph branch; swapping the model path is the P0 shortcut.
+// (F9 is the game's quickload key; F5 quicksave. Don't bind those.)
 // Results go to Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log.
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int a_vkey);
 
@@ -63,15 +67,38 @@ namespace
 		std::uint32_t formID;
 		const char*   name;
 	};
-	constexpr std::array<Binding, 4> kBindings{ {
+	constexpr std::array<Binding, 2> kBindings{ {
 		{ 0x76, 0x0001901F, "ActionDataSlateOpen" },   // F7
 		{ 0x77, 0x000222CD, "ActionDataSlateClose" },  // F8
-		{ 0x78, 0x003A15E3, "ActionDigipickRaise" },   // F9
-		{ 0x79, 0x003A15E4, "ActionDigipickLower" },   // F10
+	} };
+
+	constexpr int           kCycleKey = 0x7A;  // F11
+	constexpr std::uint32_t kSlateANIO = 0x0005AFB8;  // AnimObjectDataSlate
+	constexpr std::array<const char*, 5> kModels{ {
+		"AnimObjects\\AnimObjectDataSlate.nif",  // vanilla
+		"AnimObjects\\AnimObjectVideoGrendel.nif",
+		"AnimObjects\\AnimObjectTechReader01.nif",
+		"AnimObjects\\AnimObjectIDCard.nif",
+		"AnimObjects\\AnimObjectTablet.nif",
 	} };
 
 	std::array<bool, kBindings.size()> g_down{};
+	bool                               g_cycleDown = false;
+	std::size_t                        g_model = 0;
 	std::atomic_bool                   g_ready{ false };
+
+	void CycleModel()
+	{
+		auto* anio = RE::TESForm::LookupByID<RE::TESObjectANIO>(kSlateANIO);
+		if (!anio) {
+			REX::WARN("cycle: ANIO {:08X} not found", kSlateANIO);
+			return;
+		}
+		g_model = (g_model + 1) % kModels.size();
+		const std::string before{ anio->model.c_str() ? anio->model.c_str() : "" };
+		anio->model = kModels[g_model];
+		REX::INFO("cycle: AnimObjectDataSlate model '{}' -> '{}' (press F8 then F7 to see it)", before, anio->model.c_str());
+	}
 
 	void Perform(const Binding& a_b)
 	{
@@ -113,6 +140,11 @@ namespace
 			}
 			g_down[i] = down;
 		}
+		const bool cycle = (GetAsyncKeyState(kCycleKey) & 0x8000) != 0;
+		if (cycle && !g_cycleDown) {
+			CycleModel();
+		}
+		g_cycleDown = cycle;
 	}
 
 	void OnMessage(SFSE::MessagingInterface::Message* a_msg)
@@ -125,7 +157,7 @@ namespace
 			if (const auto* tasks = SFSE::GetTaskInterface()) {
 				tasks->AddPermanentTask([]() { Tick(); });
 				g_ready = true;
-				REX::INFO("hotkey task installed (F7 slate open, F8 slate close, F9 digipick raise, F10 digipick lower)");
+				REX::INFO("hotkey task installed (F7 slate open, F8 slate close, F11 cycle slate model)");
 			} else {
 				REX::ERROR("no task interface; hotkeys disabled");
 			}
