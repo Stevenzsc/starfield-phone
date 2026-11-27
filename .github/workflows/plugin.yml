@@ -1,0 +1,47 @@
+name: plugin
+
+on:
+  push:
+    paths:
+      - "plugin/**"
+      - ".github/workflows/plugin.yml"
+  pull_request:
+    paths:
+      - "plugin/**"
+      - ".github/workflows/plugin.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: "latest"
+
+      - name: config
+        working-directory: plugin
+        run: xmake config -y --mode=releasedbg --toolchain=msvc
+
+      - name: build
+        working-directory: plugin
+        run: xmake build -y -vD
+
+      - name: collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Get-ChildItem plugin/build -Recurse -Include PhoneTest.dll,PhoneTest.pdb | Copy-Item -Destination out
+          Get-ChildItem out
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhoneTest
+          path: out/*
