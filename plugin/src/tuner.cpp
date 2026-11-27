@@ -126,14 +126,19 @@ namespace
 		g_orig.clear();
 	}
 
+	// NOTE: don't use RE::Main::GetWorldRoot(): its Address Library ID is 0 in this CommonLibSF for 1.16.244,
+	// and resolving it raised SFSE's fatal "Invalid ID: 0" box (the game hung on the first F11). PlayerCamera's
+	// singleton ID (937788) is valid.
+	RE::NiAVObject* CameraRoot()
+	{
+		auto* cam = RE::PlayerCamera::GetSingleton();
+		return cam && cam->cameraRoot ? cam->cameraRoot.get() : nullptr;
+	}
+
 	RE::NiAVObject* SceneTop()
 	{
-		auto* world = RE::Main::GetWorldRoot();
-		if (!world || !world->camera) {
-			return nullptr;
-		}
-		RE::NiAVObject* top = world->camera.get();
-		while (top->parent) {
+		RE::NiAVObject* top = CameraRoot();
+		for (int depth = 0; top && top->parent && depth < 64; ++depth) {
 			top = top->parent;
 		}
 		return top;
@@ -149,8 +154,8 @@ namespace
 			via = "scene top";
 		}
 		if (!found) {
-			if (auto* world = RE::Main::GetWorldRoot(); world && world->cameraRoot) {
-				found = world->cameraRoot->GetObjectByName(name);
+			if (auto* root = CameraRoot()) {
+				found = root->GetObjectByName(name);
 				via = "camera root";
 			}
 		}
@@ -175,11 +180,11 @@ namespace
 	// up = remaining axis closest to world +Z.
 	bool CameraAxes(const Vec& a_objPos, Vec& a_right, Vec& a_up, Vec& a_fwd)
 	{
-		auto* world = RE::Main::GetWorldRoot();
-		if (!world || !world->camera) {
+		auto* camRoot = CameraRoot();
+		if (!camRoot) {
 			return false;
 		}
-		const auto& cw = world->camera->world;
+		const auto& cw = camRoot->world;
 		const Mat   cr = FromNi(cw.rotate);
 		const Vec   dir = Norm(Sub(a_objPos, FromNi(cw.translate)));
 		std::array<Vec, 3> axes{ Vec{ cr[0][0], cr[1][0], cr[2][0] }, Vec{ cr[0][1], cr[1][1], cr[2][1] }, Vec{ cr[0][2], cr[1][2], cr[2][2] } };
