@@ -12,7 +12,8 @@
 //
 // This plugin does the same from hotkeys:
 //   F7  ActionDataSlateOpen  (0001901F)    F8  ActionDataSlateClose (000222CD)
-//   F11 cycle the model of AnimObjectDataSlate (ANIO 0005AFB8) through other hand-held meshes, so the next F7
+//   F11 cycle the model of AnimObjectDataSlate (ANIO 0005AFB8) through the model= lines of PhoneTest.ini and re-open
+//       twice so the new model is loaded (preload); the next F7
 //       shows a different object. The .afx annotation picks the ANIO by editor ID, so a truly separate ANIO needs
 //       a new 1st-person graph branch; swapping the model path is the P0 shortcut.
 // (F9 is the game's quickload key; F5 quicksave. Don't bind those.)
@@ -23,9 +24,13 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <fstream>
 #include <string>
+#include <vector>
 
 extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int a_vkey);
 
@@ -81,19 +86,62 @@ namespace
 	constexpr std::uint32_t kScreenWidth = 504;
 	constexpr std::uint32_t kScreenHeight = 888;
 
-	constexpr std::array<const char*, 6> kModels{ {
-		"AnimObjects\\AnimObjectDataSlate.nif",  // vanilla
-		"AnimObjects\\PhoneTest\\AnimObjectPhoneTest.nif",  // vanilla slate, all materials -> PhoneScreenTest.mat
-		"AnimObjects\\AnimObjectVideoGrendel.nif",
-		"AnimObjects\\AnimObjectTechReader01.nif",
-		"AnimObjects\\AnimObjectIDCard.nif",
-		"AnimObjects\\AnimObjectTablet.nif",
-	} };
+	// Model list for F11: Data\SFSE\Plugins\PhoneTest.ini, "model=<path under Meshes>" lines, re-read on every press
+	// (tools/make_test_assets.py writes it). Falls back to the vanilla slate.
+	constexpr const char* kIniPath = "Data\\SFSE\\Plugins\\PhoneTest.ini";
+
+	std::vector<std::string> LoadModels()
+	{
+		std::vector<std::string> models;
+		std::ifstream            in(kIniPath);
+		std::string              line;
+		while (std::getline(in, line)) {
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
+			}
+			if (line.rfind("model=", 0) == 0 && line.size() > 6) {
+				models.push_back(line.substr(6));
+			}
+		}
+		if (models.empty()) {
+			models.emplace_back("AnimObjects\\AnimObjectDataSlate.nif");
+		}
+		return models;
+	}
 
 	std::array<bool, kBindings.size()> g_down{};
 	bool                               g_cycleDown = false;
 	std::size_t                        g_model = 0;
 	std::atomic_bool                   g_ready{ false };
+	bool                               g_open = false;
+
+	// Timed follow-up actions (preload: a model that is not loaded yet is missing on its first open, so after a
+	// model change we open, close and open again).
+	struct Step
+	{
+		std::chrono::steady_clock::time_point at;
+		std::size_t                           binding;
+	};
+	std::deque<Step> g_steps;
+
+	void Perform(const Binding& a_b);
+
+	void QueuePreloadOpen()
+	{
+		using namespace std::chrono_literals;
+		const auto now = std::chrono::steady_clock::now();
+		g_steps.clear();
+		if (g_open) {
+			g_steps.push_back({ now, 1 });          // close
+			g_steps.push_back({ now + 700ms, 0 });  // open (loads the model)
+			g_steps.push_back({ now + 1400ms, 1 }); // close
+			g_steps.push_back({ now + 2100ms, 0 }); // open (shows it)
+		} else {
+			g_steps.push_back({ now, 0 });
+			g_steps.push_back({ now + 700ms, 1 });
+			g_steps.push_back({ now + 1400ms, 0 });
+		}
+	}
 
 	void CycleModel()
 	{
@@ -102,10 +150,12 @@ namespace
 			REX::WARN("cycle: ANIO {:08X} not found", kSlateANIO);
 			return;
 		}
-		g_model = (g_model + 1) % kModels.size();
+		const auto models = LoadModels();
+		g_model = (g_model + 1) % models.size();
 		const std::string before{ anio->model.c_str() ? anio->model.c_str() : "" };
-		anio->model = kModels[g_model];
-		REX::INFO("cycle: AnimObjectDataSlate model '{}' -> '{}' (press F8 then F7 to see it)", before, anio->model.c_str());
+		anio->model = models[g_model].c_str();
+		REX::INFO("cycle: model {}/{} '{}' -> '{}'", g_model + 1, models.size(), before, anio->model.c_str());
+		QueuePreloadOpen();
 	}
 
 	void Perform(const Binding& a_b)
@@ -134,7 +184,8 @@ namespace
 		const bool ok = fn(&data);
 		REX::INFO("{} ({:08X}) -> PerformAction returned {}", a_b.name, a_b.formID, ok);
 		if (ok) {
-			Screen::SetActive(a_b.formID == 0x0001901F);
+			g_open = a_b.formID == 0x0001901F;
+			Screen::SetActive(g_open);
 		}
 	}
 
@@ -156,6 +207,12 @@ namespace
 			CycleModel();
 		}
 		g_cycleDown = cycle;
+
+		if (!g_steps.empty() && std::chrono::steady_clock::now() >= g_steps.front().at) {
+			const auto b = g_steps.front().binding;
+			g_steps.pop_front();
+			Perform(kBindings[b]);
+		}
 	}
 
 	void OnMessage(SFSE::MessagingInterface::Message* a_msg)
