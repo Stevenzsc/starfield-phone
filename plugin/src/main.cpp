@@ -97,6 +97,8 @@ namespace
 	// (tools/make_test_assets.py writes it). Falls back to the vanilla slate.
 	constexpr const char* kIniPath = "Data\\SFSE\\Plugins\\PhoneTest.ini";
 
+	bool g_devKeys = false;  // dev_keys=1 in the ini: F11 model cycle + numpad tuner
+
 	// screen_rotate=0|90|180|270, screen_mirror=0|1 and screen_aspect=<visible height / width> in PhoneTest.ini:
 	// how the upright UI maps onto the texture.
 	// Re-read on every open, so they can be changed while the game runs.
@@ -206,8 +208,7 @@ namespace
 	std::size_t                        g_model = 0;
 	std::atomic_bool                   g_ready{ false };
 	bool                               g_open = false;
-	bool                               g_preloaded = false;
-	bool                               g_devKeys = false;  // dev_keys=1 in the ini: F11 model cycle + numpad tuner  // current model shown once (see QueuePreloadOpen)
+	bool                               g_preloaded = false;  // current model shown once (see QueuePreloadOpen)
 	bool                               g_openKeyDown = false;
 	std::array<bool, 6>                g_navDown{};
 	constexpr std::size_t              kStepPhotoMode = 99;  // Step::binding value: open the game's photo mode
