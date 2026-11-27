@@ -258,7 +258,8 @@ def main():
     # how the upright home screen maps onto the texture; change in game and re-open (F8, F7) to try values
     # screen_aspect = visible screen height / width (the vanilla slate screen is roughly square); tune until the
     # rounded app icons look square
-    ini += ["screen_rotate=0", "screen_mirror=0", "screen_aspect=0.88"]
+    # v3: only the screen mesh shows the UI, and its UVs are rotated 180 degrees (v2 showed the TextGen layer)
+    ini += ["screen_rotate=180", "screen_mirror=0", "screen_aspect=0.88"]
     write(os.path.join(root, "SFSE", "Plugins", "PhoneTest.ini"), ("\n".join(ini) + "\n").encode())
 
 

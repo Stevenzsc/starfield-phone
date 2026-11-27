@@ -90,9 +90,42 @@ namespace Quests
 		}
 		auto& fa = dh->formArrays[std::to_underlying(RE::FormType::kQUST)];
 		fa.lock.LockRead();
+
+		// one-time diagnosis (the first version found nothing): what is in this form array?
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			std::uint32_t withObjectives = 0, withDisplayed = 0, flagged = 0;
+			for (std::uint32_t i = 0; i < fa.formArray.size(); ++i) {
+				const RE::TESForm* q = fa.formArray[i].get();
+				if (!q) continue;
+				const auto count = Read<std::uint32_t>(q, kObjCount);
+				const auto objs = Read<const void* const*>(q, kObjArray);
+				if (Read<std::uint32_t>(q, kQuestFlags) & 1) ++flagged;
+				if (!objs || count == 0 || count > 1024) continue;
+				++withObjectives;
+				for (std::uint32_t k = 0; k < count; ++k) {
+					if (objs[k] && Read<int>(objs[k], kObjState) == kStateDisplayed) {
+						++withDisplayed;
+						break;
+					}
+				}
+			}
+			REX::INFO("quests diag: array QUST size {}, flag bit0 set {}, with objectives {}, with displayed objective {}",
+				fa.formArray.size(), flagged, withObjectives, withDisplayed);
+			for (std::uint32_t i = 0; i < fa.formArray.size() && i < 3; ++i) {
+				const RE::TESForm* q = fa.formArray[i].get();
+				if (!q) continue;
+				REX::INFO("quests diag: [{}] type {} id {:08X} '{}' flags114 {:08X} objCount {}", i,
+					Read<std::uint8_t>(q, 0x2E), q->GetFormID(), q->GetFormEditorID() ? q->GetFormEditorID() : "",
+					Read<std::uint32_t>(q, kQuestFlags), Read<std::uint32_t>(q, kObjCount));
+			}
+		}
+
 		for (std::uint32_t i = 0; i < fa.formArray.size() && result.size() < a_maxQuests; ++i) {
 			const RE::TESForm* q = fa.formArray[i].get();
-			if (!q || (Read<std::uint32_t>(q, kQuestFlags) & 1) == 0) {
+			// no running-flag filter: a displayed in-progress objective is enough (the bit-0 guess found nothing)
+			if (!q) {
 				continue;
 			}
 			const auto count = Read<std::uint32_t>(q, kObjCount);
