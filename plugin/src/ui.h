@@ -20,6 +20,10 @@ namespace Ui
 	// visible screen's height / width (the UI is drawn at that aspect, then stretched over the whole texture).
 	void SetOrientation(int a_rotateDeg, bool a_mirror, float a_aspect);
 
+	// Safe area: fractions of the upright screen hidden by the slate's frame (left, top, right, bottom).
+	// The background fills the whole screen; the UI is drawn inside the safe area.
+	void SetInsets(float a_left, float a_top, float a_right, float a_bottom);
+
 	// ---- navigation ----
 	enum class Key
 	{

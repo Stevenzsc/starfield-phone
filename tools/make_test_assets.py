@@ -260,6 +260,10 @@ def main():
     # rounded app icons look square
     # v3: only the screen mesh shows the UI, and its UVs are rotated 180 degrees (v2 showed the TextGen layer)
     ini += ["screen_rotate=180", "screen_mirror=0", "screen_aspect=0.88"]
+    # safe area: fractions of the upright screen hidden by the slate frame (v3: left and top are covered)
+    ini += ["screen_inset_left=0.14", "screen_inset_top=0.06", "screen_inset_right=0.02", "screen_inset_bottom=0.02"]
+    # dev_keys=1 enables F11 (cycle models) and the numpad placement tuner
+    ini += ["dev_keys=0"]
     write(os.path.join(root, "SFSE", "Plugins", "PhoneTest.ini"), ("\n".join(ini) + "\n").encode())
 
 

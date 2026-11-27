@@ -107,6 +107,8 @@ namespace
 		int           rotate = 0;
 		bool          mirror = false;
 		float         aspect = 1.0f;
+		float         inset[4] = { 0, 0, 0, 0 };  // left, top, right, bottom
+		constexpr const char* insetKeys[4] = { "screen_inset_left=", "screen_inset_top=", "screen_inset_right=", "screen_inset_bottom=" };
 		while (std::getline(in, line)) {
 			if (!line.empty() && line.back() == '\r') {
 				line.pop_back();
@@ -117,9 +119,17 @@ namespace
 				mirror = std::atoi(line.c_str() + 14) != 0;
 			} else if (line.rfind("screen_aspect=", 0) == 0) {
 				aspect = static_cast<float>(std::atof(line.c_str() + 14));
+			} else {
+				for (int k = 0; k < 4; ++k) {
+					const std::size_t n = std::strlen(insetKeys[k]);
+					if (line.rfind(insetKeys[k], 0) == 0) {
+						inset[k] = static_cast<float>(std::atof(line.c_str() + n));
+					}
+				}
 			}
 		}
 		Ui::SetOrientation(rotate, mirror, aspect);
+		Ui::SetInsets(inset[0], inset[1], inset[2], inset[3]);
 		REX::INFO("screen: rotate {} mirror {} aspect {:.3f}", rotate, mirror, aspect);
 	}
 
@@ -137,6 +147,8 @@ namespace
 				st.brightness = std::atoi(line.c_str() + 11);
 			} else if (line.rfind("open_key=", 0) == 0) {
 				st.openKey = std::atoi(line.c_str() + 9);
+			} else if (line.rfind("dev_keys=", 0) == 0) {
+				g_devKeys = std::atoi(line.c_str() + 9) != 0;
 			}
 		}
 		Ui::SetSettings(st);
@@ -194,7 +206,8 @@ namespace
 	std::size_t                        g_model = 0;
 	std::atomic_bool                   g_ready{ false };
 	bool                               g_open = false;
-	bool                               g_preloaded = false;  // current model shown once (see QueuePreloadOpen)
+	bool                               g_preloaded = false;
+	bool                               g_devKeys = false;  // dev_keys=1 in the ini: F11 model cycle + numpad tuner  // current model shown once (see QueuePreloadOpen)
 	bool                               g_openKeyDown = false;
 	std::array<bool, 6>                g_navDown{};
 	constexpr std::size_t              kStepPhotoMode = 99;  // Step::binding value: open the game's photo mode
@@ -365,7 +378,7 @@ namespace
 			}
 		}
 		const bool cycle = (GetAsyncKeyState(kCycleKey) & 0x8000) != 0;
-		if (cycle && !g_cycleDown) {
+		if (cycle && !g_cycleDown && g_devKeys) {
 			CycleModel();
 		}
 		g_cycleDown = cycle;
@@ -380,7 +393,7 @@ namespace
 			}
 		}
 
-		Tuner::Tick(g_open);
+		Tuner::Tick(g_open && g_devKeys);
 
 		// Quests app: refresh every 2 s while its page is open
 		static auto nextQuests = std::chrono::steady_clock::now();

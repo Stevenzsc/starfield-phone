@@ -281,6 +281,8 @@ namespace
 		int openKey = 0;
 		// quests
 		int questScroll = 0;  // index of the first quest shown
+		// safe area (fractions of the upright screen)
+		float insetL = 0, insetT = 0, insetR = 0, insetB = 0;
 	};
 
 	enum Page
@@ -322,11 +324,11 @@ namespace
 	unsigned   g_drawnVersion = 0;
 	std::vector<Ui::QuestEntry> g_quests;   // guarded by g_lock
 	bool                        g_questsLoaded = false;
-	Canvas     g_canvas;
+	Canvas     g_canvas;  // whole upright screen
+	Canvas     g_inner;   // safe area
 
 	void DrawHome(Canvas& c, const State& s)
 	{
-		FillBackground(c);
 		const Rgb white{ 255, 255, 255 };
 		const int hh = int(s.hour) % 24;
 		const int mm = int((s.hour - std::floor(s.hour)) * 60.0f) % 60;
@@ -507,7 +509,6 @@ namespace
 			DrawHome(c, s);
 			return;
 		}
-		FillBackground(c);
 		switch (s.page) {
 		case kSettingsPage: DrawSettings(c, s); break;
 		case kCameraPage: DrawCamera(c, s); break;
@@ -628,6 +629,16 @@ namespace Ui
 		++g_version;
 	}
 
+	void SetInsets(float a_left, float a_top, float a_right, float a_bottom)
+	{
+		std::lock_guard lk(g_lock);
+		g_state.insetL = std::clamp(a_left, 0.0f, 0.45f);
+		g_state.insetT = std::clamp(a_top, 0.0f, 0.45f);
+		g_state.insetR = std::clamp(a_right, 0.0f, 0.45f);
+		g_state.insetB = std::clamp(a_bottom, 0.0f, 0.45f);
+		++g_version;
+	}
+
 	bool WantsQuests()
 	{
 		std::lock_guard lk(g_lock);
@@ -688,7 +699,18 @@ namespace Ui
 		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
 			g_version != g_drawnVersion) {
 			g_canvas.Resize(cw, ch);
-			DrawPage(g_canvas, s);
+			FillBackground(g_canvas);
+			// draw the page on the safe area: start from the background under it, then paste it back
+			const int ix = std::clamp(int(cw * s.insetL), 0, cw - 16), iy = std::clamp(int(ch * s.insetT), 0, ch - 16);
+			const int iw = std::max(16, cw - ix - int(cw * s.insetR)), ih = std::max(16, ch - iy - int(ch * s.insetB));
+			g_inner.Resize(iw, ih);
+			for (int y = 0; y < ih; ++y) {
+				std::memcpy(&g_inner.px[std::size_t(y) * iw * 4], &g_canvas.px[(std::size_t(iy + y) * cw + ix) * 4], std::size_t(iw) * 4);
+			}
+			DrawPage(g_inner, s);
+			for (int y = 0; y < ih; ++y) {
+				std::memcpy(&g_canvas.px[(std::size_t(iy + y) * cw + ix) * 4], &g_inner.px[std::size_t(y) * iw * 4], std::size_t(iw) * 4);
+			}
 			g_drawnMinute = minute;
 			g_drawnVersion = g_version;
 		}

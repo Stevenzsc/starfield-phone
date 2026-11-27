@@ -88,7 +88,41 @@ namespace Quests
 		if (!dh) {
 			return result;
 		}
-		auto& fa = dh->formArrays[std::to_underlying(RE::FormType::kQUST)];
+		// CommonLibSF's FormType::kQUST is not this game version's index (its form array was empty in game). Take
+		// the real type from a quest that always exists (MQ101, Starfield.esm 00003448) and find the matching array.
+		static int questArray = -1;
+		if (questArray < 0) {
+			const auto* mq101 = RE::TESForm::LookupByID(0x00003448);
+			if (!mq101) {
+				REX::WARN("quests: MQ101 not found");
+				return result;
+			}
+			const auto type = Read<std::uint8_t>(mq101, 0x2E);
+			constexpr int total = int(std::size(dh->formArrays));
+			auto matches = [&](int a_index) {
+				auto& arr = dh->formArrays[a_index].formArray;
+				return arr.size() > 0 && arr[0].get() && Read<std::uint8_t>(arr[0].get(), 0x2E) == type;
+			};
+			if (type < total && matches(type)) {
+				questArray = type;
+			} else {
+				for (int i = 0; i < total; ++i) {
+					if (matches(i)) {
+						questArray = i;
+						break;
+					}
+				}
+			}
+			REX::INFO("quests: MQ101 form type {} (CommonLibSF kQUST {}), using form array {}", type,
+				std::to_underlying(RE::FormType::kQUST), questArray);
+			if (questArray < 0) {
+				questArray = 0x7FFF;  // don't search again
+			}
+		}
+		if (questArray == 0x7FFF) {
+			return result;
+		}
+		auto& fa = dh->formArrays[questArray];
 		fa.lock.LockRead();
 
 		// one-time diagnosis (the first version found nothing): what is in this form array?
