@@ -26,10 +26,22 @@ NIF_DIR = "AnimObjects\\PhoneTest"
 
 # name: (rotation degrees about x, y, z applied in that order, translation x, y, z in NIF units = metres)
 # Round 1 (in game): only ry+90 turns the screen face toward the camera (ry-90 shows the back).
-# Round 2: +0.1 x moved it up and right (behind the fist); -x and +y left the view. Fine-tune live in game with
-# the plugin's numpad tuner instead (it uses ROOT_NAME to find the object).
+# Round 2: +0.1 x moved it up and right (behind the fist); -x and +y (0.1) left the view; y-/z were not seen.
+# Round 3: small steps on each axis. The live numpad tuner could not find the node, so placement stays offline.
+# The plugin draws N white squares on the screen for line N of PhoneTest.ini (1 = vanilla slate).
+RY = (0, 90, 0)
 VARIANTS = {
-    "live": ((0, 90, 0), (0, 0, 0)),
+    "r3_base": (RY, (0, 0, 0)),
+    "r3_x+02": (RY, (0.02, 0, 0)),
+    "r3_x+04": (RY, (0.04, 0, 0)),
+    "r3_x+06": (RY, (0.06, 0, 0)),
+    "r3_y+02": (RY, (0, 0.02, 0)),
+    "r3_y-02": (RY, (0, -0.02, 0)),
+    "r3_y-04": (RY, (0, -0.04, 0)),
+    "r3_z+02": (RY, (0, 0, 0.02)),
+    "r3_z+04": (RY, (0, 0, 0.04)),
+    "r3_z-02": (RY, (0, 0, -0.02)),
+    "r3_z-04": (RY, (0, 0, -0.04)),
 }
 ROOT_NAME = b"PhoneAnimObjectRoot"
 

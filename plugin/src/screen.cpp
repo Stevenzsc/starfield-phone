@@ -69,6 +69,7 @@ namespace
 	std::mutex           g_lock;
 	ID3D12Resource*      g_target = nullptr;  // AddRef'd
 	std::atomic_bool     g_active{ false };
+	std::atomic_uint32_t g_marker{ 0 };
 	std::atomic_uint32_t g_matches{ 0 };
 	std::atomic_uint32_t g_writes{ 0 };
 
@@ -254,7 +255,14 @@ namespace
 				const bool border = x < 12 || y < 12 || x >= g_width - 12 || y >= g_height - 12;
 				const std::uint32_t sx = (a_frame * 7) % (g_width - 80);
 				const bool square = x >= sx && x < sx + 80 && y >= g_height / 2 - 40 && y < g_height / 2 + 40;
-				if (border || square) {
+				// variant marker: N white squares (24 px, 6 px gap, wrapping every 14) near the top, on black
+				const std::uint32_t mx = x >= 24 ? (x - 24) : 0xFFFF, my = y >= 30 ? (y - 30) : 0xFFFF;
+				const std::uint32_t idx = (my / 34) * 14 + mx / 30;
+				const bool inBand = x >= 24 && y >= 30 && my / 34 < 2 && mx / 30 < 14;
+				const bool mark = inBand && idx < g_marker.load() && (mx % 30) < 24 && (my % 34) < 24;
+				if (inBand) {
+					p[0] = p[1] = p[2] = mark ? 255 : 0;
+				} else if (border || square) {
 					p[0] = p[1] = p[2] = 255;
 				} else {
 					p[0] = colors[band][0];
@@ -359,6 +367,11 @@ namespace Screen
 		dev->Release();
 		Log("screen writer armed for %ux%u RGBA8 textures", a_width, a_height);
 		return true;
+	}
+
+	void SetMarker(std::uint32_t a_count)
+	{
+		g_marker = a_count;
 	}
 
 	void SetActive(bool a_active)

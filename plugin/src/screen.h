@@ -9,4 +9,5 @@ namespace Screen
 
 	bool Install(std::uint32_t a_width, std::uint32_t a_height, LogFn a_log);
 	void SetActive(bool a_active);
+	void SetMarker(std::uint32_t a_count);  // draw this many white squares along the top edge
 }
