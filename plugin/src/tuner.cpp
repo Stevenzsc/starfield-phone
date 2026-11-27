@@ -135,31 +135,80 @@ namespace
 		return cam && cam->cameraRoot ? cam->cameraRoot.get() : nullptr;
 	}
 
-	RE::NiAVObject* SceneTop()
+	RE::NiAVObject* TopOf(RE::NiAVObject* a_obj)
 	{
-		RE::NiAVObject* top = CameraRoot();
-		for (int depth = 0; top && top->parent && depth < 64; ++depth) {
-			top = top->parent;
+		for (int depth = 0; a_obj && a_obj->parent && depth < 64; ++depth) {
+			a_obj = a_obj->parent;
 		}
-		return top;
+		return a_obj;
 	}
+
+	// the player's (third-person) 3D; its scene top is the world scene root
+	RE::NiAVObject* Player3D()
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			return nullptr;
+		}
+		const auto guard = player->loadedData.LockRead();
+		const auto* data = *guard;
+		return data && data->data3D ? data->data3D.get() : nullptr;
+	}
+
+	const char* NameOf(RE::NiAVObject* a_obj)
+	{
+		const char* n = a_obj ? a_obj->name.c_str() : nullptr;
+		return n && *n ? n : "(unnamed)";
+	}
+
+	void LogTree(const char* a_label, RE::NiAVObject* a_top)
+	{
+		if (!a_top) {
+			REX::INFO("tuner: {}: none", a_label);
+			return;
+		}
+		auto* node = reinterpret_cast<RE::NiNode*>(a_top);
+		std::string kids;
+		for (std::uint32_t i = 0; i < node->children.size() && i < 40; ++i) {
+			kids += ' ';
+			kids += NameOf(node->children[i].get());
+		}
+		REX::INFO("tuner: {}: top '{}' children[{}]:{}", a_label, NameOf(a_top), node->children.size(), kids);
+	}
+
+	bool g_loggedTrees = false;
 
 	void Find()
 	{
 		const RE::BSFixedString name{ kRootName };
-		RE::NiAVObject*         found = nullptr;
-		const char*             via = "";
-		if (auto* top = SceneTop()) {
-			found = top->GetObjectByName(name);
-			via = "scene top";
-		}
-		if (!found) {
-			if (auto* root = CameraRoot()) {
-				found = root->GetObjectByName(name);
-				via = "camera root";
+		struct Start
+		{
+			const char*     label;
+			RE::NiAVObject* obj;
+		};
+		auto* camRoot = CameraRoot();
+		auto* p3d = Player3D();
+		const Start starts[] = {
+			{ "player 3D scene top", TopOf(p3d) },
+			{ "camera root scene top", TopOf(camRoot) },
+			{ "player 3D", p3d },
+			{ "camera root", camRoot },
+		};
+		RE::NiAVObject* found = nullptr;
+		const char*     via = "";
+		for (const auto& s : starts) {
+			if (s.obj && (found = s.obj->GetObjectByName(name)) != nullptr) {
+				via = s.label;
+				break;
 			}
 		}
 		if (!found) {
+			if (!g_loggedTrees) {
+				g_loggedTrees = true;
+				REX::INFO("tuner: '{}' not found; scene roots for diagnosis:", kRootName);
+				LogTree("player 3D scene top", TopOf(p3d));
+				LogTree("camera root scene top", TopOf(camRoot));
+			}
 			return;
 		}
 		auto* node = reinterpret_cast<RE::NiNode*>(found);
