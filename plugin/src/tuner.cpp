@@ -230,9 +230,34 @@ namespace
 	std::chrono::steady_clock::time_point g_nextSearch{};
 	bool                                  g_loggedTrees = false;
 
-	// object to tune: the one captured in the attach hook, or else search the scenes by name
+	RE::NiPointer<RE::NiAVObject> g_bone;  // the bone the object hangs on (1st-person L_AnimObject1), kept across opens
+
+	// newest child of the bone with our root name: every open attaches a NEW object, and the old one can stay
+	// under the bone, so the first match of a name search is not necessarily the visible one
+	RE::NiAVObject* NewestOnBone()
+	{
+		if (!g_bone) {
+			return nullptr;
+		}
+		std::uint16_t   count = 0;
+		auto* const*    kids = Children(g_bone.get(), count);
+		RE::NiAVObject* newest = nullptr;
+		for (std::uint16_t i = 0; kids && i < count && i < 256; ++i) {
+			const char* n = kids[i] ? kids[i]->name.c_str() : nullptr;
+			if (n && std::strcmp(n, kRootName) == 0) {
+				newest = kids[i];
+			}
+		}
+		return newest;
+	}
+
+	// object to tune: newest on the remembered bone; else the attach hook's capture; else a scene search by name
 	RE::NiAVObject* Locate(const char*& a_via)
 	{
+		if (auto* o = NewestOnBone()) {
+			a_via = "bone children";
+			return o;
+		}
 		{
 			std::lock_guard lk(g_captureLock);
 			if (g_captured && g_captured->parent) {
@@ -258,6 +283,13 @@ namespace
 			if (st.obj) {
 				if (auto* f = FindByName(st.obj, name)) {
 					a_via = st.label;
+					if (f->parent) {
+						g_bone = RE::NiPointer<RE::NiAVObject>(f->parent);
+						REX::INFO("tuner: object hangs on '{}'; following that bone from now on", NameOf(f->parent));
+						if (auto* o = NewestOnBone()) {
+							return o;
+						}
+					}
 					return f;
 				}
 			}
