@@ -39,7 +39,7 @@ NIF_DIR = "AnimObjects\\PhoneTest"
 # The plugin draws N white squares on the screen for line N of PhoneTest.ini (1 = vanilla slate).
 RY = (0, 90, 0)
 VARIANTS = {
-    "r3e_base": (RY, (0, 0, 0)),  # base the tuner offset is relative to (re-tune from here); emissive screen
+    "r3f_base": (RY, (0, 0, 0)),  # base the tuner offset is relative to (re-tune from here); emissive screen
 }
 ROOT_NAME = b"PhoneAnimObjectRoot"
 
@@ -170,9 +170,10 @@ def transform_offset(data, block_off):
 def make_nif(src_nif, rot_deg, trans, post=None):
     out = open(src_nif, "rb").read()
     # header strings are <uint32 len><chars>; nothing points at their byte offsets, so lengths may change.
-    # Front face (screen + generated text) -> our material; sides and back stay vanilla.
+    # Screen face -> our material; sides, back and the generated-text part stay vanilla. (Up to v2 the TextGen part
+    # used our material too: it showed a mirrored slice of the UI on the strip by the hinge.)
     new = SCREEN_MAT_REL.encode()
-    for old in (b"Materials\\Items\\DataSlate\\Dataslatescreen_01.mat", b"Materials\\Items\\Dataslate\\DataSlate_TextGen01.mat"):
+    for old in (b"Materials\\Items\\DataSlate\\Dataslatescreen_01.mat",):
         needle = struct.pack("<I", len(old)) + old
         if out.count(needle) != 1:
             raise SystemExit(f"nif: expected one header string {old!r}")
@@ -246,8 +247,8 @@ def main():
     placed = placement_post()
     if placed:
         # tuned placement first (one F11 press reaches it); transposed = verified convention (round 4)
-        # v2 = v1 placement with the emissive screen material (new name: the game caches NIFs by path)
-        jobs.append(("v2", RY, (0, 0, 0), (placed[0], placed[1], True)))
+        # v3 = v1 placement, emissive screen, vanilla TextGen part (new name: the game caches NIFs by path)
+        jobs.append(("v3", RY, (0, 0, 0), (placed[0], placed[1], True)))
     jobs += [(name, rot, trans, None) for name, (rot, trans) in VARIANTS.items()]
     for name, rot, trans, post in jobs:
         # file names change with the transform method: the game caches a loaded NIF by path for the session
@@ -257,7 +258,7 @@ def main():
     # how the upright home screen maps onto the texture; change in game and re-open (F8, F7) to try values
     # screen_aspect = visible screen height / width (the vanilla slate screen is roughly square); tune until the
     # rounded app icons look square
-    ini += ["screen_rotate=0", "screen_mirror=0", "screen_aspect=1.0"]
+    ini += ["screen_rotate=0", "screen_mirror=0", "screen_aspect=0.88"]
     write(os.path.join(root, "SFSE", "Plugins", "PhoneTest.ini"), ("\n".join(ini) + "\n").encode())
 
 

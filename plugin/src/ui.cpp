@@ -330,7 +330,8 @@ namespace Ui
 	void SetGameTime(std::uint32_t a_year, std::uint32_t a_month, std::uint32_t a_day, float a_hour)
 	{
 		std::lock_guard lk(g_lock);
-		g_state.year = a_year;
+		// the GameYear global holds 330 for the year the game shows as 2330 (seen in game)
+		g_state.year = a_year < 1000 ? a_year + 2000 : a_year;
 		g_state.month = a_month;
 		g_state.day = a_day;
 		g_state.hour = a_hour;
