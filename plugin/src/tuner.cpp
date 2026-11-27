@@ -13,7 +13,9 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <fstream>
+#include <mutex>
 #include <numbers>
 #include <vector>
 
@@ -101,7 +103,6 @@ namespace
 	RE::NiPointer<RE::NiAVObject>       g_root;
 	std::vector<RE::NiAVObject*>        g_children;  // owned by g_root
 	std::vector<RE::NiTransform>        g_orig;
-	std::chrono::steady_clock::time_point g_nextSearch{};
 	std::chrono::steady_clock::time_point g_nextRepeat{};
 	std::array<bool, 16>                g_wasDown{};
 
@@ -135,93 +136,70 @@ namespace
 		return cam && cam->cameraRoot ? cam->cameraRoot.get() : nullptr;
 	}
 
-	RE::NiAVObject* TopOf(RE::NiAVObject* a_obj)
-	{
-		for (int depth = 0; a_obj && a_obj->parent && depth < 64; ++depth) {
-			a_obj = a_obj->parent;
-		}
-		return a_obj;
-	}
+	// ---- capture: hook the engine's AnimObject attach ----
+	// FUN_14034D400 (Address Library ID 37954) attaches a loaded model to a skeleton: it looks up the bone named by
+	// the model root's "Prn" extra data, zeroes the root's local translation and attaches it to that bone. Its only
+	// direct caller is ID 37953 +0x6B0 (E8 call); rdx = pointer to the model root. Searching the scene by name never
+	// found the 1st-person object, so take it here instead.
+	// Layout as the engine itself uses it there: children array data at +0x138, uint16 count at +0x142;
+	// local transform +0x40 (translation +0x70), world +0x80, name +0x10, parent +0x38, refcount +0x08.
+	constexpr REL::ID          kAttachCaller{ 37953 };
+	constexpr std::ptrdiff_t   kAttachCallOffset = 0x6B0;
+	using Attach_t = bool (*)(void* a_ctx, void** a_model);
+	Attach_t                      g_attachOrig = nullptr;
+	std::mutex                    g_captureLock;
+	RE::NiPointer<RE::NiAVObject> g_captured;  // newest attached object with our root name
 
-	// the player's (third-person) 3D; its scene top is the world scene root
-	RE::NiAVObject* Player3D()
+	bool Attach_Hook(void* a_ctx, void** a_model)
 	{
-		auto* player = RE::PlayerCharacter::GetSingleton();
-		if (!player) {
-			return nullptr;
-		}
-		const auto guard = player->loadedData.LockRead();
-		const auto* data = *guard;
-		return data && data->data3D ? data->data3D.get() : nullptr;
-	}
-
-	const char* NameOf(RE::NiAVObject* a_obj)
-	{
-		const char* n = a_obj ? a_obj->name.c_str() : nullptr;
-		return n && *n ? n : "(unnamed)";
-	}
-
-	void LogTree(const char* a_label, RE::NiAVObject* a_top)
-	{
-		if (!a_top) {
-			REX::INFO("tuner: {}: none", a_label);
-			return;
-		}
-		auto* node = reinterpret_cast<RE::NiNode*>(a_top);
-		std::string kids;
-		for (std::uint32_t i = 0; i < node->children.size() && i < 40; ++i) {
-			kids += ' ';
-			kids += NameOf(node->children[i].get());
-		}
-		REX::INFO("tuner: {}: top '{}' children[{}]:{}", a_label, NameOf(a_top), node->children.size(), kids);
-	}
-
-	bool g_loggedTrees = false;
-
-	void Find()
-	{
-		const RE::BSFixedString name{ kRootName };
-		struct Start
-		{
-			const char*     label;
-			RE::NiAVObject* obj;
-		};
-		auto* camRoot = CameraRoot();
-		auto* p3d = Player3D();
-		const Start starts[] = {
-			{ "player 3D scene top", TopOf(p3d) },
-			{ "camera root scene top", TopOf(camRoot) },
-			{ "player 3D", p3d },
-			{ "camera root", camRoot },
-		};
-		RE::NiAVObject* found = nullptr;
-		const char*     via = "";
-		for (const auto& s : starts) {
-			if (s.obj && (found = s.obj->GetObjectByName(name)) != nullptr) {
-				via = s.label;
-				break;
+		const bool result = g_attachOrig(a_ctx, a_model);
+		if (a_model && *a_model) {
+			auto*       obj = static_cast<RE::NiAVObject*>(*a_model);
+			const char* n = obj->name.c_str();
+			if (n && std::strcmp(n, kRootName) == 0) {
+				std::lock_guard lk(g_captureLock);
+				g_captured = RE::NiPointer<RE::NiAVObject>(obj);
 			}
 		}
-		if (!found) {
-			if (!g_loggedTrees) {
-				g_loggedTrees = true;
-				REX::INFO("tuner: '{}' not found; scene roots for diagnosis:", kRootName);
-				LogTree("player 3D scene top", TopOf(p3d));
-				LogTree("camera root scene top", TopOf(camRoot));
-			}
-			return;
-		}
-		auto* node = reinterpret_cast<RE::NiNode*>(found);
-		g_root = RE::NiPointer<RE::NiAVObject>(found);
+		return result;
+	}
+
+	void Release()
+	{
+		g_root.reset();
 		g_children.clear();
 		g_orig.clear();
-		for (std::uint32_t i = 0; i < node->children.size(); ++i) {
-			if (auto* c = node->children[i].get()) {
+	}
+
+	// take the newest captured object (if it is a new one) and remember its children's NIF transforms
+	void Adopt()
+	{
+		RE::NiPointer<RE::NiAVObject> cap;
+		{
+			std::lock_guard lk(g_captureLock);
+			cap = g_captured;
+		}
+		// skip the same object, and a stale one from an earlier open that is already detached
+		if (!cap || cap.get() == g_root.get() || !cap->parent) {
+			return;
+		}
+		Release();
+		const auto base = reinterpret_cast<std::uintptr_t>(cap.get());
+		auto* const* kids = *reinterpret_cast<RE::NiAVObject* const* const*>(base + 0x138);
+		const auto   count = *reinterpret_cast<const std::uint16_t*>(base + 0x142);
+		if (!kids || count == 0 || count > 64) {
+			REX::WARN("tuner: captured '{}' but its children look wrong (count {})", kRootName, count);
+			return;
+		}
+		g_root = cap;
+		for (std::uint16_t i = 0; i < count; ++i) {
+			if (auto* c = kids[i]) {
 				g_children.push_back(c);
 				g_orig.push_back(c->local);
 			}
 		}
-		REX::INFO("tuner: found '{}' via {} with {} children", kRootName, via, g_children.size());
+		const auto& t = g_root->world.translate;
+		REX::INFO("tuner: captured '{}' with {} children, world pos ({:.2f}, {:.2f}, {:.2f})", kRootName, g_children.size(), t.x, t.y, t.z);
 	}
 
 	// Camera-relative axes (right, up, forward) in world space, picked from the camera's own axes so they don't
@@ -311,6 +289,18 @@ namespace
 
 namespace Tuner
 {
+	void Install()
+	{
+		const auto site = kAttachCaller.address() + kAttachCallOffset;
+		const auto op = *reinterpret_cast<const std::uint8_t*>(site);
+		if (op != 0xE8) {
+			REX::ERROR("tuner: expected a call at ID 37953 +0x{:X}, found 0x{:02X}; live tuning disabled", kAttachCallOffset, op);
+			return;
+		}
+		g_attachOrig = reinterpret_cast<Attach_t>(REL::GetTrampoline().write_call<5>(site, Attach_Hook));
+		REX::INFO("tuner: hooked AnimObject attach at Starfield.exe+0x{:X}", kAttachCaller.offset() + kAttachCallOffset);
+	}
+
 	void Load()
 	{
 		std::ifstream in(kSavePath);
@@ -349,10 +339,7 @@ namespace Tuner
 		if (g_root && !g_root->parent) {
 			Release();
 		}
-		if (!g_root && now >= g_nextSearch) {
-			g_nextSearch = now + std::chrono::milliseconds(250);
-			Find();
-		}
+		Adopt();
 
 		// keys: act on press, then repeat every 60 ms while held
 		bool any = false;

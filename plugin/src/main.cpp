@@ -17,12 +17,13 @@
 //       shows a different object. The .afx annotation picks the ANIO by editor ID, so a truly separate ANIO needs
 //       a new 1st-person graph branch; swapping the model path is the P0 shortcut.
 //   The screen shows N white squares at the top for model N of PhoneTest.ini (1 = first line).
-//   (tuner.cpp, the numpad live tuner, is disabled: it never found the node and its diagnosis crashed.)
+//   Numpad: live placement tuner while open (tuner.cpp; it captures the object in the engine's attach call).
 // (F9 is the game's quickload key; F5 quicksave. Don't bind those.)
 // Results go to Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log.
 
 #include "pch.h"
 #include "screen.h"
+#include "tuner.h"
 
 #include <array>
 #include <atomic>
@@ -219,6 +220,7 @@ namespace
 			Perform(kBindings[b]);
 		}
 
+		Tuner::Tick(g_open);
 	}
 
 	void OnMessage(SFSE::MessagingInterface::Message* a_msg)
@@ -229,6 +231,7 @@ namespace
 		// SFSE for Starfield has no load-game message; press the keys only after a save is loaded.
 		if (a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
 			if (const auto* tasks = SFSE::GetTaskInterface()) {
+				Tuner::Load();
 				tasks->AddPermanentTask([]() { Tick(); });
 				g_ready = true;
 				REX::INFO("hotkey task installed (F7 slate open, F8 slate close, F11 cycle slate model)");
@@ -241,9 +244,10 @@ namespace
 
 SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
-	SFSE::Init(a_sfse);
+	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 64 });
 	REX::INFO("PhoneTest loaded; PerformAction ptr at Starfield.exe+0x{:X}", kPerformActionPtr.offset());
 	Screen::Install(kScreenWidth, kScreenHeight, [](const char* a_msg) { REX::INFO("{}", a_msg); });
+	Tuner::Install();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {
 		REX::ERROR("could not register for SFSE messages");
 	}
