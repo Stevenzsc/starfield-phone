@@ -218,6 +218,29 @@ namespace
 		}
 	}
 
+	std::vector<std::string> Wrap(const std::string& a_utf8, float a_px, int a_maxW)
+	{
+		std::vector<std::string> lines;
+		std::string              line;
+		const auto*              p = reinterpret_cast<const unsigned char*>(a_utf8.c_str());
+		while (*p) {
+			int len = 1;
+			if ((*p >> 5) == 0x6) len = 2;
+			else if ((*p >> 4) == 0xE) len = 3;
+			else if ((*p >> 3) == 0x1E) len = 4;
+			std::string ch(reinterpret_cast<const char*>(p), std::min<std::size_t>(len, std::strlen(reinterpret_cast<const char*>(p))));
+			p += ch.size();
+			if (!line.empty() && TextWidth((line + ch).c_str(), a_px) > a_maxW) {
+				lines.push_back(line);
+				line.clear();
+				if (ch == " ") continue;
+			}
+			line += ch;
+		}
+		if (!line.empty()) lines.push_back(line);
+		return lines;
+	}
+
 	void TextCentered(Canvas& c, int a_cx, int a_y, const char* a_utf8, float a_px, Rgb a_color, float a_alpha = 1.0f)
 	{
 		Text(c, a_cx - TextWidth(a_utf8, a_px) / 2, a_y, a_utf8, a_px, a_color, a_alpha);
@@ -256,6 +279,8 @@ namespace
 		// settings
 		int brightness = 100;
 		int openKey = 0;
+		// quests
+		int questScroll = 0;  // index of the first quest shown
 	};
 
 	enum Page
@@ -295,6 +320,8 @@ namespace
 	int        g_drawnMinute = -1;
 	unsigned   g_version = 1;  // bumped on every navigation / settings change
 	unsigned   g_drawnVersion = 0;
+	std::vector<Ui::QuestEntry> g_quests;   // guarded by g_lock
+	bool                        g_questsLoaded = false;
 	Canvas     g_canvas;
 
 	void DrawHome(Canvas& c, const State& s)
@@ -421,13 +448,50 @@ namespace
 		TextCentered(c, c.w / 2, cy + d + int(H * 0.06f) + int(f * 1.5f), "手机会先收起", f * 0.8f, { 190, 200, 220 }, 0.9f);
 	}
 
-	void DrawQuests(Canvas& c, const State&)
+	void DrawQuests(Canvas& c, const State& s)
 	{
-		const float H = float(c.h);
-		const int   y = DrawHeader(c, "任务", kApps[1].top);
-		const float f = std::max(14.0f, H * 0.048f);
-		TextCentered(c, c.w / 2, y + int(H * 0.1f), "任务列表开发中", f, { 255, 255, 255 });
-		TextCentered(c, c.w / 2, y + int(H * 0.1f) + int(f * 1.6f), "下个版本显示当前任务和目标", f * 0.8f, { 190, 200, 220 }, 0.9f);
+		const float H = float(c.h), W = float(c.w);
+		int         y = DrawHeader(c, "任务", kApps[1].top);
+		const int   pad = int(W * 0.06f);
+		const float nameF = std::max(14.0f, H * 0.047f);
+		const float objF = std::max(12.0f, H * 0.038f);
+		const int   bottom = c.h - int(H * 0.13f);
+		if (!g_questsLoaded) {
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", nameF, { 255, 255, 255 });
+			return;
+		}
+		if (g_quests.empty()) {
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有进行中的任务", nameF, { 255, 255, 255 });
+			return;
+		}
+		const int first = std::clamp(s.questScroll, 0, int(g_quests.size()) - 1);
+		int       shown = 0;
+		for (int i = first; i < int(g_quests.size()); ++i) {
+			const auto& q = g_quests[i];
+			const auto  nameLines = Wrap(q.name, nameF, c.w - 2 * pad);
+			if (shown > 0 && y + int(nameF * 1.3f) * int(nameLines.size()) > bottom) {
+				break;
+			}
+			for (const auto& l : nameLines) {
+				Text(c, pad, y, l.c_str(), nameF, { 255, 214, 10 });
+				y += int(nameF * 1.3f);
+			}
+			for (const auto& o : q.objectives) {
+				const auto lines = Wrap(o, objF, c.w - 2 * pad - int(objF * 1.2f));
+				for (std::size_t k = 0; k < lines.size(); ++k) {
+					if (y + int(objF * 1.3f) > bottom) break;
+					if (k == 0) Text(c, pad, y, "•", objF, { 220, 230, 245 });
+					Text(c, pad + int(objF * 1.2f), y, lines[k].c_str(), objF, { 220, 230, 245 });
+					y += int(objF * 1.3f);
+				}
+			}
+			y += int(H * 0.025f);
+			++shown;
+			if (y > bottom) break;
+		}
+		char hint[64];
+		std::snprintf(hint, sizeof(hint), "↑↓ 翻页   %d / %d", first + 1, int(g_quests.size()));
+		DrawHint(c, hint);
 	}
 
 	void DrawPlaceholder(Canvas& c, const State& s)
@@ -501,6 +565,10 @@ namespace Ui
 				st.openedApp = st.homeSel;
 				st.page = PageFor(st.homeSel);
 				st.setSel = 0;
+				st.questScroll = 0;
+				if (st.page == kQuestsPage) {
+					g_questsLoaded = false;
+				}
 				break;
 			default: return Action::kNone;
 			}
@@ -521,6 +589,14 @@ namespace Ui
 				act = Action::kSettingsChanged;
 				break;
 			}
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		case kQuestsPage:
+			switch (a_key) {
+			case Key::kUp: st.questScroll = std::max(0, st.questScroll - 1); break;
+			case Key::kDown: st.questScroll = std::min(std::max(0, int(g_quests.size()) - 1), st.questScroll + 1); break;
 			case Key::kBack: st.page = kHome; break;
 			default: return Action::kNone;
 			}
@@ -549,6 +625,23 @@ namespace Ui
 	{
 		std::lock_guard lk(g_lock);
 		g_state.page = kHome;
+		++g_version;
+	}
+
+	bool WantsQuests()
+	{
+		std::lock_guard lk(g_lock);
+		return g_state.page == kQuestsPage;
+	}
+
+	void SetQuests(std::vector<QuestEntry> a_quests)
+	{
+		std::lock_guard lk(g_lock);
+		g_quests = std::move(a_quests);
+		g_questsLoaded = true;
+		if (g_state.questScroll >= int(g_quests.size())) {
+			g_state.questScroll = std::max(0, int(g_quests.size()) - 1);
+		}
 		++g_version;
 	}
 

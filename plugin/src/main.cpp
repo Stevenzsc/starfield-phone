@@ -25,6 +25,7 @@
 #include "screen.h"
 #include "tuner.h"
 #include "ui.h"
+#include "quests.h"
 
 #include <array>
 #include <atomic>
@@ -380,6 +381,17 @@ namespace
 		}
 
 		Tuner::Tick(g_open);
+
+		// Quests app: refresh every 2 s while its page is open
+		static auto nextQuests = std::chrono::steady_clock::now();
+		if (g_open && Ui::WantsQuests() && std::chrono::steady_clock::now() >= nextQuests) {
+			nextQuests = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+			auto list = Quests::CollectActive(40);
+			REX::INFO("quests: {} active with displayed objectives", list.size());
+			Ui::SetQuests(std::move(list));
+		} else if (!Ui::WantsQuests()) {
+			nextQuests = std::chrono::steady_clock::now();
+		}
 
 		// in-game calendar for the home screen, twice a second
 		static auto nextTime = std::chrono::steady_clock::now();

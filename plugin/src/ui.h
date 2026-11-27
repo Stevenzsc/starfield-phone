@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 // Phone home screen, rendered on the CPU into the screen texture (see screen.cpp).
 // Thread use: Set* from the game's task thread, Render from the render thread (internally locked).
@@ -48,6 +50,15 @@ namespace Ui
 	int         OpenKeyCount();
 	int         OpenKeyVk(int a_index);  // Windows virtual-key code
 	const char* OpenKeyName(int a_index);
+
+	// ---- Quests app ----
+	struct QuestEntry
+	{
+		std::string              name;
+		std::vector<std::string> objectives;  // in-progress, displayed objectives
+	};
+	bool WantsQuests();                                 // the Quests page is open: feed it with SetQuests
+	void SetQuests(std::vector<QuestEntry> a_quests);  // from the game's task thread
 
 	// Write the current frame into an R8G8B8A8 texture-sized buffer (a_pitch bytes per row).
 	// Returns false if the UI is not ready (no font).
