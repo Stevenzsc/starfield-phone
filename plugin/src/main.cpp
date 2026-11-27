@@ -16,11 +16,13 @@
 //       twice so the new model is loaded (preload); the next F7
 //       shows a different object. The .afx annotation picks the ANIO by editor ID, so a truly separate ANIO needs
 //       a new 1st-person graph branch; swapping the model path is the P0 shortcut.
+//   Numpad: live placement tuner while open (see tuner.cpp).
 // (F9 is the game's quickload key; F5 quicksave. Don't bind those.)
 // Results go to Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log.
 
 #include "pch.h"
 #include "screen.h"
+#include "tuner.h"
 
 #include <array>
 #include <atomic>
@@ -215,6 +217,8 @@ namespace
 			g_steps.pop_front();
 			Perform(kBindings[b]);
 		}
+
+		Tuner::Tick(g_open);
 	}
 
 	void OnMessage(SFSE::MessagingInterface::Message* a_msg)
@@ -225,6 +229,7 @@ namespace
 		// SFSE for Starfield has no load-game message; press the keys only after a save is loaded.
 		if (a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
 			if (const auto* tasks = SFSE::GetTaskInterface()) {
+				Tuner::Load();
 				tasks->AddPermanentTask([]() { Tick(); });
 				g_ready = true;
 				REX::INFO("hotkey task installed (F7 slate open, F8 slate close, F11 cycle slate model)");

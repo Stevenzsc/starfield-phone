@@ -24,17 +24,14 @@ MAT_REL = "Materials\\PhoneTest\\PhoneScreenTest.mat"
 TEX_REL = "Textures\\PhoneTest\\PhoneScreenTest.dds"
 NIF_DIR = "AnimObjects\\PhoneTest"
 
-# name: (rotation degrees about x, y, z applied in that order, translation x, y, z in NIF units)
+# name: (rotation degrees about x, y, z applied in that order, translation x, y, z in NIF units = metres)
+# Round 1 (in game): only ry+90 turns the screen face toward the camera (ry-90 shows the back).
+# Round 2: +0.1 x moved it up and right (behind the fist); -x and +y left the view. Fine-tune live in game with
+# the plugin's numpad tuner instead (it uses ROOT_NAME to find the object).
 VARIANTS = {
-    "base": ((0, 0, 0), (0, 0, 0)),
-    "rx+90": ((90, 0, 0), (0, 0, 0)),
-    "rx-90": ((-90, 0, 0), (0, 0, 0)),
-    "ry+90": ((0, 90, 0), (0, 0, 0)),
-    "ry-90": ((0, -90, 0), (0, 0, 0)),
-    "rz+90": ((0, 0, 90), (0, 0, 0)),
-    "rz-90": ((0, 0, -90), (0, 0, 0)),
-    "rx180": ((180, 0, 0), (0, 0, 0)),
+    "live": ((0, 90, 0), (0, 0, 0)),
 }
+ROOT_NAME = b"PhoneAnimObjectRoot"
 
 
 def write(path, data):
@@ -129,6 +126,12 @@ def make_nif(src_nif, rot_deg, trans):
         if out.count(needle) != 1:
             raise SystemExit(f"nif: expected one header string {old!r}")
         out = out.replace(needle, struct.pack("<I", len(new)) + new)
+    # Unique root name, so the plugin's live tuner finds OUR object and not an NPC's vanilla slate.
+    old = b"AnimObjectDataSlate"
+    needle = struct.pack("<I", len(old)) + old
+    if out.count(needle) != 1:
+        raise SystemExit("nif: expected one header string 'AnimObjectDataSlate'")
+    out = out.replace(needle, struct.pack("<I", len(ROOT_NAME)) + ROOT_NAME)
 
     # The engine overwrites the ROOT node's transform when it attaches an AnimObject (verified in game: rotating
     # the root changed nothing), so apply the variant to every geometry child instead:
