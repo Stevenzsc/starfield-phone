@@ -21,7 +21,19 @@
   +20 u32 0, +28 second vtbl (ID 393260), +30/+38 empty `BSFixedString`, +40..+60 zero.
 - Console `player.playidle 26FCCA`, `player.sae IdleDataSlateEquip` and `player.playidle 3A1975` showed nothing in first person.
 
+## In-game results (2026-11-27)
+
+- F7 (`ActionDataSlateOpen` through PerformAction) shows the data slate in the left hand in 1st person; F8 puts it away.
+- Swapping `AnimObjectDataSlate`'s model path at runtime works: the engine reads the path on every open.
+  `animobjecttablet.nif` showed in the left hand, but only on the SECOND open: a model that is not loaded yet is
+  missing on the first open (the `.afx` draws it at frame 1, before the async load finishes). Preload the phone
+  model before opening.
+- The 1st-person attach bone comes from the NIF's `Prn` string. `L_AnimObject1` works (data slate, tablet).
+  Not checked in 1st person: `R_AnimObject1` (id card, tech reader) and `AnimObjectA` (digipick, Grendel).
+- A truly separate ANIO needs its own `.afx` payload, so its own animation suffix: a new branch in
+  `human_1stpersonroot.agx`.
+
 ## Test plugin
 
-`plugin/` builds `PhoneTest.dll`: F7/F8 slate open/close, F9/F10 digipick raise/lower, log in
+`plugin/` builds `PhoneTest.dll`: F7/F8 slate open/close, F11 cycles the slate's model, log in
 `Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log`.
