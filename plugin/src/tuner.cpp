@@ -164,13 +164,6 @@ namespace
 		return result;
 	}
 
-	void Release()
-	{
-		g_root.reset();
-		g_children.clear();
-		g_orig.clear();
-	}
-
 	// take the newest captured object (if it is a new one) and remember its children's NIF transforms
 	void Adopt()
 	{
