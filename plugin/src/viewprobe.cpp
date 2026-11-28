@@ -484,7 +484,7 @@ namespace
 	std::uint64_t IniBits()
 	{
 		std::FILE* f = nullptr;
-		if (fopen_s(&f, "Data\SFSE\Plugins\PhoneTest.ini", "r") != 0 || !f) {
+		if (fopen_s(&f, "Data\\SFSE\\Plugins\\PhoneTest.ini", "r") != 0 || !f) {
 			return kDefaultBits;
 		}
 		char          line[256];
