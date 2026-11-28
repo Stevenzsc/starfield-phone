@@ -27,6 +27,7 @@
 #include "tuner.h"
 #include "ui.h"
 #include "quests.h"
+#include "viewprobe.h"
 
 #include <array>
 #include <atomic>
@@ -300,6 +301,7 @@ namespace
 			if (g_open) {
 				LoadScreenOptions();
 				Ui::OnOpen();
+				ViewProbe::Run();  // second-view research: log the renderer's view / output tables
 			}
 			Screen::SetActive(g_open);
 			Camera::SetActive(g_open);
