@@ -432,55 +432,28 @@ namespace
 	}
 
 	// ---- Camera page hold animation ----
-	// The phone's Camera page plays a real 1st-person animation: the mod's Human_1stPersonRoot.agx adds a PhoneCamera
+	// The phone's Camera page plays a 1st-person animation: the mod's Human_1stPersonRoot.agx adds a PhoneCamera
 	// state to the dataslate state machine (Idle <-> PhoneCamera on events PhoneCameraIn / PhoneCameraOut, file
 	// PhoneCamera_DataSlate.af; tools/make_camera_graph.py, tools/make_camera_anim.py).
-	// The 1st-person graph only takes events through actions (console sae does not reach it), so the event goes out
-	// through the vanilla close: IDLE Human_1stPersonRoot_DataSlateClose (0026FCC9, played by ActionDataSlateClose)
-	// carries its graph event as a BSFixedString; for one PerformAction call it carries ours instead, then the
-	// original pointer goes back. The field is found by value: pooled strings share one entry, so the IDLE holds the
-	// same pointer as our BSFixedString("DataSlateClose").
-	constexpr std::uint32_t kIdleDataSlateClose = 0x0026FCC9;
-
+	// Sending the event: PerformAction (FUN_1419AA9A0 -> FUN_1419AAAF0) picks the IDLE, writes its event name into the
+	// action data (+0x30) and hands it to the actor's animation graph holder at actor +0x60, vtable slot 1 (+0x08):
+	// fn(holder, BSFixedString* event, 0) -> bool. We call that directly. (Going through ActionDataSlateClose with the
+	// IDLE's event swapped did reach the graph, but the action's own close handling put the phone away.)
 	bool SendSlateEvent(bool a_in)
 	{
-		static const RE::BSFixedString close("DataSlateClose");
 		static const RE::BSFixedString in("PhoneCameraIn");
 		static const RE::BSFixedString out("PhoneCameraOut");
-		static std::ptrdiff_t          field = -1;
 		const RE::BSFixedString&       ev = a_in ? in : out;
-		// a BSFixedString is one pointer to its pool entry
-		static_assert(sizeof(RE::BSFixedString) == sizeof(void*));
-		const auto entry = [](const RE::BSFixedString& a_s) { return *reinterpret_cast<const void* const*>(&a_s); };
 
-		auto* idle = RE::TESForm::LookupByID(kIdleDataSlateClose);
-		if (!idle || !entry(close)) {
-			REX::WARN("camera hold: IDLE {:08X} not found", kIdleDataSlateClose);
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
 			return false;
 		}
-		const auto base = reinterpret_cast<std::uintptr_t>(idle);
-		if (field < 0) {
-			for (std::ptrdiff_t off = 0x30; off < 0x200; off += 8) {
-				if (*reinterpret_cast<const void* const*>(base + off) == entry(close)) {
-					field = off;
-					break;
-				}
-			}
-			if (field < 0) {
-				REX::WARN("camera hold: IDLE {:08X} holds no DataSlateClose string", kIdleDataSlateClose);
-				return false;
-			}
-			REX::INFO("camera hold: IDLE {:08X} event field at +0x{:X}", kIdleDataSlateClose, field);
-		}
-		auto* slot = reinterpret_cast<const void**>(base + field);
-		if (*slot != entry(close)) {
-			REX::WARN("camera hold: IDLE event field changed, not sending {}", ev.c_str());
-			return false;
-		}
-		*slot = entry(ev);
-		const bool ok = PerformRaw(kBindings[1]);
-		*slot = entry(close);
-		REX::INFO("camera hold: {} -> PerformAction returned {}", ev.c_str(), ok);
+		const auto holder = reinterpret_cast<std::uintptr_t>(player) + 0x60;
+		using Notify_t = bool (*)(std::uintptr_t, const RE::BSFixedString*, std::uintptr_t);
+		const auto fn = (*reinterpret_cast<Notify_t* const*>(holder))[1];
+		const bool ok = fn(holder, &ev, 0);
+		REX::INFO("camera hold: {} -> graph notify returned {}", ev.c_str(), ok);
 		return ok;
 	}
 
