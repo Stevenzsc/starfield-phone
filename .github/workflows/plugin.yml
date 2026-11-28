@@ -45,3 +45,17 @@ jobs:
         with:
           name: PhoneTest
           path: out/*
+
+      - name: ui preview
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force preview | Out-Null
+          $exe = Get-ChildItem plugin/build -Recurse -Filter UiPreview.exe | Select-Object -First 1
+          & $exe.FullName preview
+          Get-ChildItem preview
+
+      - name: upload preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: UiPreview
+          path: preview/*

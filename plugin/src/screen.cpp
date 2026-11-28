@@ -401,7 +401,8 @@ namespace
 			std::unique_lock lk(g_lock, std::try_to_lock);
 			const auto now = std::chrono::steady_clock::now();
 			int        camW = 0, camH = 0;
-			const auto interval = std::chrono::milliseconds(Ui::CameraTarget(camW, camH) ? 40 : 66);  // viewfinder: 25 fps
+			// transitions: 40 fps; viewfinder: 25 fps; otherwise 15 fps
+			const auto interval = std::chrono::milliseconds(Ui::Animating() ? 25 : Ui::CameraTarget(camW, camH) ? 40 : 66);
 			if (lk.owns_lock() && g_target && now - last >= interval && InitWriter(g_target)) {
 				const int s = g_w.slot;
 				if (g_w.fence->GetCompletedValue() >= g_w.fenceValue[s]) {

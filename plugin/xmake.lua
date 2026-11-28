@@ -23,3 +23,11 @@ target("PhoneTest")
     add_syslinks("d3d12")
     add_packages("stb")
     add_cxflags("/utf-8")  -- UTF-8 source (Chinese UI strings)
+
+-- UiPreview: renders the phone UI (src/ui.cpp) to PNG contact sheets of the page transitions; run by CI
+target("UiPreview")
+    set_kind("binary")
+    add_files("src/ui.cpp", "preview/main.cpp")
+    add_includedirs("src")
+    add_packages("stb")
+    add_cxflags("/utf-8")

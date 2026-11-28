@@ -514,7 +514,6 @@ namespace
 	int                                   g_unread = 0;
 	std::string                           g_bannerTitle, g_bannerText;
 	std::chrono::steady_clock::time_point g_bannerUntil{};
-	bool                                  g_drawnBanner = false;
 	Canvas     g_canvas;  // whole upright screen
 	Canvas     g_inner;   // safe area
 
@@ -551,6 +550,143 @@ namespace
 	std::vector<std::uint8_t> g_galImg;      // RGBA8; empty = could not be opened
 	int                       g_galImgW = 0, g_galImgH = 0, g_galImgMaxW = 0, g_galImgMaxH = 0;
 	bool                      g_galLoading = false;
+
+	// ---- transitions (iOS-like) ----
+	// A page change snapshots what is on screen (g_shown), draws the new page once into g_inner, and then only
+	// composites the two bitmaps (scale / slide / dim) until the animation ends: no text is laid out per frame.
+	// The status bar stays fixed; only the rows under it move.
+	enum class Anim
+	{
+		kNone,
+		kLaunch,  // home -> app: the page grows out of its tile, home zooms in and dims behind it
+		kClose,   // app -> home: the page shrinks back into its tile
+		kPush,    // deeper page slides in from the right, the old one moves left (parallax) and dims
+		kPop,     // reverse of kPush
+		kWake,    // phone taken out: the screen fades in from black while the content settles from a slight zoom
+	};
+	struct Transition
+	{
+		Anim                                  kind = Anim::kNone;
+		int                                   tile = 0;  // app tile for kLaunch / kClose
+		std::chrono::steady_clock::time_point start{};
+		float                                 seconds = 0.4f;
+	};
+	struct IRect
+	{
+		int x = 0, y = 0, w = 0, h = 0;
+	};
+	Anim             g_pending = Anim::kNone;  // set by Input / OnOpen, started by the next Render (g_lock)
+	int              g_pendingTile = 0;
+	Transition       g_anim;
+	std::atomic_bool g_animating{ false };  // read by the screen writer to raise its frame rate
+	Canvas           g_from;    // the screen as it was when the transition started (safe-area size)
+	Canvas           g_shown;   // last composited safe area (without the banner)
+	Canvas           g_view;    // g_shown + banner
+	Canvas           g_bg;      // full-screen background
+	int              g_statusBottom = 0;  // safe-area row under the status bar of the last drawn page
+	IRect            g_tiles[std::size(kApps)]{};  // home tiles of the last drawn home screen (safe-area coordinates)
+	float            g_fade = 1.0f;       // screen brightness factor of the last composite (kWake)
+	bool             g_bannerWasOn = false;
+
+	constexpr float kBannerIn = 0.45f, kBannerOut = 0.3f;  // seconds
+
+	// critically damped spring, normalised so it settles at t = 1 (the feel of UIKit's default spring)
+	float Spring(float a_t)
+	{
+		if (a_t <= 0) return 0;
+		if (a_t >= 1) return 1;
+		const float w = 7.0f * a_t;
+		return std::min(1.0f, (1.0f - (1.0f + w) * std::exp(-w)) / 0.99271f);
+	}
+
+	// under-damped spring (damping 0.75, ~3% overshoot) for the banner drop
+	float SpringBouncy(float a_t)
+	{
+		if (a_t <= 0) return 0;
+		if (a_t >= 1) return 1;
+		constexpr float z = 0.75f, w = 10.0f;
+		const float     wd = w * std::sqrt(1 - z * z);
+		return 1.0f - std::exp(-z * w * a_t) * (std::cos(wd * a_t) + z / std::sqrt(1 - z * z) * std::sin(wd * a_t));
+	}
+
+	int Depth(int a_page);
+
+	// copy rows [y0, y1) of a_src into a_dst shifted by a_ox, darkened by a_dim (0..1)
+	void BlitShift(Canvas& a_dst, const Canvas& a_src, int a_ox, int a_y0, int a_y1, float a_dim)
+	{
+		const int x0 = std::max(0, a_ox), x1 = std::min(a_dst.w, a_src.w + a_ox);
+		if (x1 <= x0) return;
+		const int k = int((1.0f - std::clamp(a_dim, 0.0f, 1.0f)) * 256.0f);
+		for (int y = std::max(0, a_y0); y < std::min({ a_y1, a_dst.h, a_src.h }); ++y) {
+			auto*       d = &a_dst.px[(std::size_t(y) * a_dst.w + x0) * 4];
+			const auto* s = &a_src.px[(std::size_t(y) * a_src.w + (x0 - a_ox)) * 4];
+			if (k >= 256) {
+				std::memcpy(d, s, std::size_t(x1 - x0) * 4);
+				continue;
+			}
+			for (int i = 0; i < (x1 - x0) * 4; i += 4) {
+				d[i] = std::uint8_t(s[i] * k >> 8), d[i + 1] = std::uint8_t(s[i + 1] * k >> 8), d[i + 2] = std::uint8_t(s[i + 2] * k >> 8);
+				d[i + 3] = 255;
+			}
+		}
+	}
+
+	// draw rows [a_sy0, a_sy1) of a_src scaled into the rectangle (a_rx, a_ry, a_rw, a_rh) of a_dst, clipped to rows
+	// [a_cy0, a_cy1); a_alpha blends over a_dst, a_dim darkens; bilinear or nearest sampling
+	void BlitScaled(Canvas& a_dst, const Canvas& a_src, int a_sy0, int a_sy1, float a_rx, float a_ry, float a_rw, float a_rh,
+		int a_cy0, int a_cy1, float a_alpha, float a_dim, bool a_bilinear)
+	{
+		if (a_rw < 1 || a_rh < 1 || a_alpha <= 0 || a_sy1 <= a_sy0 || a_src.w <= 0) return;
+		const int   x0 = std::max(0, int(std::floor(a_rx))), x1 = std::min(a_dst.w, int(std::ceil(a_rx + a_rw)));
+		const int   y0 = std::max({ 0, a_cy0, int(std::floor(a_ry)) }), y1 = std::min({ a_dst.h, a_cy1, int(std::ceil(a_ry + a_rh)) });
+		const float kx = float(a_src.w) / a_rw, ky = float(a_sy1 - a_sy0) / a_rh;
+		const float a = std::min(1.0f, a_alpha), keep = 1.0f - std::clamp(a_dim, 0.0f, 1.0f);
+		static thread_local std::vector<int>   xi;
+		static thread_local std::vector<float> xf;
+		xi.resize(std::max(0, x1 - x0));
+		xf.resize(xi.size());
+		for (int x = x0; x < x1; ++x) {
+			const float fx = std::clamp((x + 0.5f - a_rx) * kx - 0.5f, 0.0f, float(a_src.w - 1));
+			xi[x - x0] = int(fx);
+			xf[x - x0] = a_bilinear ? fx - float(int(fx)) : 0.0f;
+		}
+		for (int y = y0; y < y1; ++y) {
+			const float fy = std::clamp(a_sy0 + (y + 0.5f - a_ry) * ky - 0.5f, float(a_sy0), float(a_sy1 - 1));
+			const int   r0 = int(fy), r1 = std::min(r0 + 1, a_sy1 - 1);
+			const float ty = a_bilinear ? fy - float(r0) : 0.0f;
+			const auto* row0 = &a_src.px[std::size_t(r0) * a_src.w * 4];
+			const auto* row1 = &a_src.px[std::size_t(r1) * a_src.w * 4];
+			auto*       d = &a_dst.px[(std::size_t(y) * a_dst.w + x0) * 4];
+			for (int x = x0; x < x1; ++x, d += 4) {
+				const int   c0 = xi[x - x0], c1 = std::min(c0 + 1, a_src.w - 1);
+				const float tx = xf[x - x0];
+				for (int ch = 0; ch < 3; ++ch) {
+					float v;
+					if (a_bilinear) {
+						const float top = row0[c0 * 4 + ch] + (row0[c1 * 4 + ch] - row0[c0 * 4 + ch]) * tx;
+						const float bot = row1[c0 * 4 + ch] + (row1[c1 * 4 + ch] - row1[c0 * 4 + ch]) * tx;
+						v = (top + (bot - top) * ty) * keep;
+					} else {
+						v = row0[c0 * 4 + ch] * keep;
+					}
+					d[ch] = std::uint8_t(a >= 1.0f ? v : d[ch] + (v - d[ch]) * a);
+				}
+				d[3] = 255;
+			}
+		}
+	}
+
+	// soft shadow left of column a_x (the edge of a page sliding over another)
+	void ShadowLeft(Canvas& c, int a_x, int a_y0, int a_y1, int a_width, float a_strength)
+	{
+		for (int d = 0; d < a_width; ++d) {
+			const int x = a_x - 1 - d;
+			if (x < 0 || x >= c.w) continue;
+			const float k = 1.0f - float(d) / float(a_width);
+			const float a = a_strength * k * k;
+			for (int y = std::max(0, a_y0); y < std::min(c.h, a_y1); ++y) c.Blend(x, y, { 0, 0, 0 }, a);
+		}
+	}
 
 	// ---- shared chrome ----
 	int Pad(const Canvas& c) { return int(c.w * 0.05f); }
@@ -688,6 +824,7 @@ namespace
 			const int   x = gx + col * (tile + gapX);
 			const int   y = gridTop + row * (tile + labelH + gapY);
 			const bool  sel = int(i) == s.homeSel;
+			g_tiles[i] = { x, y, tile, tile };
 			if (sel) {
 				Rect(c, x, y, tile, tile, kSelBg);
 			} else {
@@ -1468,9 +1605,21 @@ namespace
 		TextCentered(c, c.w / 2, y + int(H * 0.14f), "即将推出", std::max(16.0f, H * 0.055f), kDim);
 	}
 
+	int Depth(int a_page)
+	{
+		switch (a_page) {
+		case kHome: return 0;
+		case kQuestDetailPage:
+		case kPhotoPage:
+		case kCallPage: return 2;
+		default: return 1;
+		}
+	}
+
 	void DrawPage(Canvas& c, const State& s)
 	{
 		const int y = StatusBar(c, s);
+		g_statusBottom = y;
 		switch (s.page) {
 		case kHome: DrawHome(c, s, y); break;
 		case kSettingsPage: DrawSettings(c, s, y); break;
@@ -1487,9 +1636,85 @@ namespace
 		case kMessagesPage: DrawMessages(c, s, y); break;
 		default: DrawPlaceholder(c, s, y); break;
 		}
-		if (std::chrono::steady_clock::now() < g_bannerUntil && s.page != kMessagesPage) {
-			DrawBanner(c, y);
+		// the banner is a separate layer (see Compose / Render) so it can slide
+	}
+
+	// g_inner (the current page, drawn) -> g_shown, through the running transition; sets g_fade
+	void Compose(std::chrono::steady_clock::time_point a_now)
+	{
+		const int iw = g_inner.w, ih = g_inner.h;
+		if (g_shown.w != iw || g_shown.h != ih) {
+			g_shown.Resize(iw, ih);
 		}
+		g_fade = 1.0f;
+		auto& A = g_anim;
+		const float t = std::chrono::duration<float>(a_now - A.start).count() / A.seconds;
+		if (A.kind == Anim::kNone || t >= 1.0f || (A.kind != Anim::kWake && (g_from.w != iw || g_from.h != ih))) {
+			A.kind = Anim::kNone;
+			g_shown.px = g_inner.px;
+			return;
+		}
+		const int top = std::clamp(g_statusBottom, 0, ih);  // the status bar stays put
+		std::memcpy(g_shown.px.data(), g_inner.px.data(), std::size_t(top) * iw * 4);
+		const float W = float(iw), CH = float(ih - top);
+		const float e = Spring(t);
+		switch (A.kind) {
+		case Anim::kLaunch:
+		case Anim::kClose: {
+			const bool    launch = A.kind == Anim::kLaunch;
+			const float   p = launch ? e : 1.0f - e;  // 0 = tile, 1 = full page
+			const Canvas& fg = launch ? g_inner : g_from;
+			const Canvas& bg = launch ? g_from : g_inner;
+			IRect         T = g_tiles[std::clamp(A.tile, 0, int(std::size(g_tiles)) - 1)];
+			if (T.w <= 0) {
+				T = { iw / 2 - iw / 10, top + int(CH / 2) - iw / 10, iw / 5, iw / 5 };
+			}
+			const float cx = T.x + T.w / 2.0f, cy = T.y + T.h / 2.0f;
+			// home behind: zooms towards the tile and dims as the page grows
+			const float s = 1.0f + 0.1f * p;
+			BlitScaled(g_shown, bg, top, ih, cx - cx * s, cy + (top - cy) * s, W * s, CH * s, top, ih, 1.0f, 0.5f * p, false);
+			// the page: from the tile rectangle to the content area, fading in over the first third
+			const float rx = T.x * (1 - p), ry = T.y + (top - T.y) * p;
+			const float rw = T.w + (W - T.w) * p, rh = T.h + (CH - T.h) * p;
+			BlitScaled(g_shown, fg, top, ih, rx, ry, rw, rh, top, ih, std::clamp(p / 0.3f, 0.0f, 1.0f), 0.0f, true);
+			break;
+		}
+		case Anim::kPush:
+		case Anim::kPop: {
+			const bool    push = A.kind == Anim::kPush;
+			const float   p = push ? e : 1.0f - e;  // 0 = shallow page shown, 1 = deep page shown
+			const Canvas& deep = push ? g_inner : g_from;
+			const Canvas& shallow = push ? g_from : g_inner;
+			BlitShift(g_shown, shallow, -int(std::lround(W * 0.3f * p)), top, ih, 0.3f * p);
+			const int dx = int(std::lround(W * (1.0f - p)));
+			BlitShift(g_shown, deep, dx, top, ih, 0.0f);
+			ShadowLeft(g_shown, dx, top, ih, std::max(4, int(W * 0.04f)), 0.45f * (1.0f - p * 0.6f));
+			break;
+		}
+		case Anim::kWake: {
+			if (t < 0) {
+				g_shown.px = g_inner.px;
+				g_fade = 0.0f;
+				return;
+			}
+			const float s = 1.06f - 0.06f * e;
+			const float cx = W / 2, cy = top + CH / 2;
+			BlitScaled(g_shown, g_inner, top, ih, cx - cx * s, cy + (top - cy) * s, W * s, CH * s, top, ih, 1.0f, 0.0f, false);
+			g_fade = Spring(std::min(1.0f, t * 1.6f));
+			break;
+		}
+		default: break;
+		}
+	}
+
+	// banner slide: 0 = hidden above, 1 = in place; < 0 = not shown
+	float BannerPos(std::chrono::steady_clock::time_point a_now)
+	{
+		if (a_now >= g_bannerUntil) return -1.0f;
+		const float left = std::chrono::duration<float>(g_bannerUntil - a_now).count();
+		const float age = 4.0f - left;  // PushMessage shows a banner for 4 s
+		if (left < kBannerOut) return Spring(left / kBannerOut);
+		return SpringBouncy(age / kBannerIn);
 	}
 }
 
@@ -1524,6 +1749,7 @@ namespace Ui
 	{
 		std::lock_guard lk(g_lock);
 		auto&           st = g_state;
+		const int       before = st.page;
 		const int       n = int(std::size(kApps));
 		const int       cols = 4;
 		Action          act = Action::kNone;
@@ -1792,6 +2018,14 @@ namespace Ui
 			st.page = kHome;
 			break;
 		}
+		if (st.page != before) {
+			g_pending = before == kHome ? Anim::kLaunch :
+			            st.page == kHome ? Anim::kClose :
+			            Depth(st.page) > Depth(before) ? Anim::kPush :
+			                                              Anim::kPop;
+			g_pendingTile = st.openedApp;
+			g_animating = true;  // raise the screen writer's frame rate before the next Render
+		}
 		g_camOpen = st.page == kCameraPage;
 		++g_version;
 		return act;
@@ -1802,8 +2036,13 @@ namespace Ui
 		std::lock_guard lk(g_lock);
 		g_state.page = kHome;
 		g_camOpen = false;
+		g_anim.kind = Anim::kNone;
+		g_pending = Anim::kWake;
+		g_animating = true;
 		++g_version;
 	}
+
+	bool Animating() { return g_animating.load(); }
 
 	bool CameraTarget(int& a_w, int& a_h)
 	{
@@ -2007,29 +2246,73 @@ namespace Ui
 		const int   cw = tw;
 		const int   ch = std::max(16, int(std::lround(cw * s.aspect)));
 		const int   minute = int(s.hour * 60.0f);
-		const bool  banner = std::chrono::steady_clock::now() < g_bannerUntil;
-		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
-			g_version != g_drawnVersion || banner != g_drawnBanner ||
+		const auto  now = std::chrono::steady_clock::now();
+		const int   ix = std::clamp(int(cw * s.insetL), 0, cw - 16), iy = std::clamp(int(ch * s.insetT), 0, ch - 16);
+		const int   iw = std::max(16, cw - ix - int(cw * s.insetR)), ih = std::max(16, ch - iy - int(ch * s.insetB));
+		bool        compose = false;
+		if (g_bg.w != cw || g_bg.h != ch) {
+			g_bg.Resize(cw, ch);
+			FillBackground(g_bg);
+		}
+		if (g_canvas.w != cw || g_canvas.h != ch || g_inner.w != iw || g_inner.h != ih || minute != g_drawnMinute ||
+			s.day != g_drawn.day || g_version != g_drawnVersion ||
 			((s.page == kCameraPage || s.page == kPhotoPage) && g_camSeq.load() != g_drawnCamSeq)) {
 			g_drawnCamSeq = g_camSeq.load();
-			g_canvas.Resize(cw, ch);
-			FillBackground(g_canvas);
-			// draw the page on the safe area: start from the background under it, then paste it back
-			const int ix = std::clamp(int(cw * s.insetL), 0, cw - 16), iy = std::clamp(int(ch * s.insetT), 0, ch - 16);
-			const int iw = std::max(16, cw - ix - int(cw * s.insetR)), ih = std::max(16, ch - iy - int(ch * s.insetB));
-			g_inner.Resize(iw, ih);
+			// a page change: animate from what is on screen now
+			if (g_pending != Anim::kNone) {
+				if (g_pending == Anim::kWake || (g_shown.w == iw && g_shown.h == ih)) {
+					if (g_pending != Anim::kWake) {
+						g_from.w = g_shown.w, g_from.h = g_shown.h, g_from.px = g_shown.px;
+					}
+					const bool wake = g_pending == Anim::kWake;
+					const bool open = g_pending == Anim::kLaunch || g_pending == Anim::kClose;
+					g_anim = { g_pending, g_pendingTile, now + std::chrono::milliseconds(wake ? 120 : 0), wake ? 0.5f : open ? 0.42f : 0.38f };
+				}
+				g_pending = Anim::kNone;
+			}
+			// draw the page on the safe area, over the background under it
+			if (g_inner.w != iw || g_inner.h != ih) {
+				g_inner.Resize(iw, ih);
+			}
 			for (int y = 0; y < ih; ++y) {
-				std::memcpy(&g_inner.px[std::size_t(y) * iw * 4], &g_canvas.px[(std::size_t(iy + y) * cw + ix) * 4], std::size_t(iw) * 4);
+				std::memcpy(&g_inner.px[std::size_t(y) * iw * 4], &g_bg.px[(std::size_t(iy + y) * cw + ix) * 4], std::size_t(iw) * 4);
 			}
 			DrawPage(g_inner, s);
-			for (int y = 0; y < ih; ++y) {
-				std::memcpy(&g_canvas.px[(std::size_t(iy + y) * cw + ix) * 4], &g_inner.px[std::size_t(y) * iw * 4], std::size_t(iw) * 4);
-			}
 			g_drawnMinute = minute;
 			g_drawnVersion = g_version;
-			g_drawnBanner = banner;
+			compose = true;
 		}
-		const float bright = s.brightness / 100.0f;
+		const float bannerPos = s.page == kMessagesPage ? -1.0f : BannerPos(now);
+		const bool  bannerOn = bannerPos >= 0.0f;
+		if (g_anim.kind != Anim::kNone || bannerOn || bannerOn != g_bannerWasOn || g_canvas.w != cw || g_canvas.h != ch) {
+			compose = true;
+		}
+		if (compose) {
+			Compose(now);
+			const Canvas* out = &g_shown;
+			if (bannerOn) {
+				// the banner drops from above the screen edge (bouncy), and slides back up before it goes
+				g_view.w = g_shown.w, g_view.h = g_shown.h, g_view.px = g_shown.px;
+				const float f = std::max(12.0f, ih * 0.036f);
+				const int   rest = g_statusBottom;
+				const int   hidden = -(g_statusBottom + int(ih * 0.01f) + int(f * 3.1f) + 4);
+				DrawBanner(g_view, int(std::lround(hidden + (rest - hidden) * bannerPos)));
+				out = &g_view;
+			}
+			if (g_canvas.w != cw || g_canvas.h != ch) {
+				g_canvas.Resize(cw, ch);
+			}
+			g_canvas.px = g_bg.px;
+			for (int y = 0; y < ih; ++y) {
+				std::memcpy(&g_canvas.px[(std::size_t(iy + y) * cw + ix) * 4], &out->px[std::size_t(y) * iw * 4], std::size_t(iw) * 4);
+			}
+			g_bannerWasOn = bannerOn;
+		}
+		// fast frames while something moves: a transition, or the banner sliding in / out
+		const float bannerAge = std::chrono::duration<float>(now - (g_bannerUntil - std::chrono::seconds(4))).count();
+		const bool  bannerMoving = bannerOn && (bannerAge < kBannerIn || bannerAge > 4.0f - kBannerOut - 0.1f);
+		g_animating = g_anim.kind != Anim::kNone || g_pending != Anim::kNone || bannerMoving;
+		const float bright = s.brightness / 100.0f * g_fade;
 		g_drawn = s;
 		const float sy = float(ch) / float(th);  // canvas rows per upright texture row
 		for (std::uint32_t ty = 0; ty < a_height; ++ty) {

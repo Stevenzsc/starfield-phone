@@ -45,6 +45,7 @@ namespace Ui
 	};
 	Action Input(Key a_key);  // from the game's task thread while the phone is open
 	void   OnOpen();          // phone taken out: back to the home screen
+	bool   Animating();       // a page transition or the banner is moving: write the screen at a higher rate
 
 	// ---- settings (Settings app; saved in PhoneTest.ini) ----
 	struct Settings
