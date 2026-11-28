@@ -307,6 +307,43 @@ namespace
 	}
 
 	// start with the first phone model of the ini (line 2; line 1 is the vanilla slate)
+	// Preload a model into the engine's model cache, so the AnimObject shows on its FIRST open (otherwise its async
+	// load finishes after the animation's AnimObjDraw and the hand is empty). Same calls as FUN_14242CB10 /
+	// FUN_142428F00 in Starfield.exe 1.16.244:
+	//   NormalizePath  (ID 137147, FUN_1427DB100)(char buf[0x108], path, path, "meshes\\") -> normalized path
+	//   MakeResourceID (ID 137049, FUN_1427D7580)(u32 id[3], normalized)                   -> BSResource ID
+	//   DemandModel    (ID 127164, FUN_142428730)(id, &handle, &args{u32 0, u8 0x2D, u8 0}, 5)
+	//                  -> 0 loaded, 6 queued (async); the handle keeps the entry alive, so we never release it.
+	bool PreloadModel(const std::string& a_path)
+	{
+		using normalize_t = const char* (*)(char*, const char*, const char*, const char*);
+		using makeId_t = void (*)(std::uint32_t*, const char*);
+		using demand_t = int (*)(const std::uint32_t*, void**, void*, std::uint32_t);
+		static const REL::Relocation<normalize_t> normalize{ REL::ID(137147) };
+		static const REL::Relocation<makeId_t>    makeId{ REL::ID(137049) };
+		static const REL::Relocation<demand_t>    demand{ REL::ID(127164) };
+
+		alignas(16) char buf[0x110]{};
+		const char*      norm = normalize(buf, a_path.c_str(), a_path.c_str(), "meshes\\");
+		if (!norm) {
+			REX::WARN("preload: could not normalize '{}'", a_path);
+			return false;
+		}
+		alignas(8) std::uint32_t id[4]{};
+		makeId(id, norm);
+		struct Args
+		{
+			std::uint32_t a = 0;
+			std::uint8_t  b = 0x2D;
+			std::uint8_t  c = 0;
+			std::uint16_t pad = 0;
+		} args;
+		static void* handle = nullptr;  // kept for the session
+		const int    r = demand(id, &handle, &args, 5);
+		REX::INFO("preload: '{}' ({}) -> {} handle {}", a_path, norm, r, handle);
+		return (r == 0 || r == 6) && handle != nullptr;
+	}
+
 	void UseDefaultModel()
 	{
 		const auto models = LoadModels();
@@ -318,6 +355,8 @@ namespace
 			anio->model = models[1].c_str();
 			Screen::SetMarker(2);
 			REX::INFO("model: using '{}'", models[1]);
+			// cached already: skip the open/close/open preload sequence on the first open
+			g_preloaded = PreloadModel(models[1]);
 		}
 	}
 
