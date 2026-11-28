@@ -602,11 +602,20 @@ namespace
 		REX::INFO("arm: pose saved to {}", kArmSavePath);
 	}
 
+	// the photo pose tuned in game (repo defaults/PhoneTest_arm_pose.txt): used when no file is installed
+	constexpr Mat kDefaultBoneRot[kBones] = {
+		{ { { 0.990331F, 0.122923F, -0.0643091F }, { -0.122129F, 0.992384F, 0.0161445F }, { 0.0658037F, -0.00813428F, 0.997801F } } },
+		{ { { 0.998979F, 0.00428132F, -0.0449942F }, { 0.00353155F, 0.985067F, 0.172141F }, { 0.0450592F, -0.172124F, 0.984046F } } },
+		{ { { 0.997566F, -0.0039548F, 0.0696264F }, { -0.000913388F, 0.997565F, 0.0697486F }, { -0.0697326F, -0.0696423F, 0.995132F } } },
+		{ { { 0.771979F, -0.210935F, 0.599631F }, { 0.0849723F, 0.969114F, 0.231515F }, { -0.629945F, -0.127772F, 0.766059F } } },
+	};
+
 	void LoadArm()
 	{
 		std::ifstream in(kArmSavePath);
 		if (!in) {
-			REX::INFO("arm: no saved pose ({})", kArmSavePath);
+			for (int b = 0; b < kBones; ++b) g_boneRot[b] = kDefaultBoneRot[b];
+			REX::INFO("arm: no saved pose ({}), using the built-in photo pose", kArmSavePath);
 			return;
 		}
 		in.imbue(std::locale::classic());
@@ -934,6 +943,63 @@ namespace
 		}
 	}
 
+	// (g_armLock held) after the component computed: recompute the model-space array (block +0x10 -> +0x10) for the
+	// clavicle's subtree from the locals with our offsets. FUN_142BE93F0 builds model[i] = local[i] (x) model[parent[i]]
+	// (convention 1; parent indices: u16 table at block +0x28), but it can also take the pose from a controller
+	// (+0x70) without reading the locals, which is why writing the locals before the call was not enough.
+	void ApplyModelArray(std::uintptr_t a_comp)
+	{
+		if (!g_arr.ok || g_armWeight.load() <= 0.0F) {
+			return;
+		}
+		const auto    block = ReadPtr(a_comp + 0x10);
+		const auto    locals = block ? ReadPtr(ReadPtr(block + 0x08) + 0x10) : 0;
+		const auto    model = block ? ReadPtr(ReadPtr(block + 0x10) + 0x10) : 0;
+		const auto    parents = block ? ReadPtr(block + 0x28) : 0;
+		std::uint16_t count = 0;
+		SafeCopy(reinterpret_cast<const void*>(a_comp + 0x78), &count, sizeof(count));
+		if (!locals || !model || !parents || count < 8 || count > 1024) {
+			return;
+		}
+		static std::uint16_t par[1024];
+		if (!SafeCopy(reinterpret_cast<const void*>(parents), par, std::size_t(count) * 2)) {
+			return;
+		}
+		static bool inSub[1024];
+		const int   clav = g_arr.index[0];
+		const float w = g_armWeight.load();
+		int         n = 0;
+		for (int i = 0; i < count; ++i) {
+			inSub[i] = i == clav || (par[i] < count && par[i] < i && inSub[par[i]]);
+			if (!inSub[i] || i == clav && par[i] >= count) {
+				continue;
+			}
+			++n;
+			auto* L = reinterpret_cast<RE::NiTransform*>(locals + std::uintptr_t(i) * 0x40);
+			auto* M = reinterpret_cast<RE::NiTransform*>(model + std::uintptr_t(i) * 0x40);
+			const auto* P = reinterpret_cast<const RE::NiTransform*>(model + std::uintptr_t(par[i]) * 0x40);
+			RE::NiTransform local = *L;
+			for (int b = 0; b < kBones; ++b) {
+				if (g_arr.index[b] != i) continue;
+				// the local already carries our offset when nothing rewrote it since ApplyArrayOffsets
+				const bool ours = g_arr.haveWritten[b] && std::memcmp(L, g_arr.written[b], sizeof(g_arr.written[b])) == 0;
+				if (!ours) {
+					Xf off;
+					off.rot = g_boneRot[b];
+					const Mat d = w >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, w).rot;
+					SetMat(local.rotate, Mul(MatOf(local), d));
+				}
+			}
+			ComposeWorld(*P, local, 1, *M);
+		}
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			REX::INFO("arm: model array {:X}, parents {:X}: {} bones recomputed below the clavicle (index {}, parent {})", model, parents, n,
+				clav, par[clav]);
+		}
+	}
+
 	std::uintptr_t PoseUpdate_Hook(void* a_comp, void* a_2, void* a_3, void* a_4)
 	{
 		PoseUpdate_t orig = nullptr;
@@ -950,6 +1016,10 @@ namespace
 		}
 		const std::uintptr_t r = orig ? orig(a_comp, a_2, a_3, a_4) : 0;
 		if (reinterpret_cast<std::uintptr_t>(a_comp) == g_poseComp.load() && g_hookBones[0].load()) {
+			{
+				std::lock_guard lk(g_armLock);
+				ApplyModelArray(reinterpret_cast<std::uintptr_t>(a_comp));
+			}
 			++g_poseUpdates;
 			for (int b = 0; b < kBones; ++b) {
 				ApplyBoneOffset(b);
@@ -1213,9 +1283,12 @@ namespace Tuner
 			if (LoadXf(kCameraSavePath, g_cam)) {
 				REX::INFO("tuner: camera pose loaded from {}", kCameraSavePath);
 			} else {
-				// first guess until tuned: lower and a bit to the left, out of the upper right of the screen
-				MoveCameraSpace(g_cam, -0.05F, -0.16F, 0.0F);
-				REX::INFO("tuner: camera pose default (tune with the numpad on the Camera page, 5 saves)");
+				// the pose tuned in game (repo defaults/PhoneTest_camera_offset.txt): the phone stays in the hand, the
+				// arm pose moves both
+				g_cam.rot = { { { 1.00002F, -0.000455752F, 0.00496641F }, { 0.000477783F, 1.00003F, -0.00484394F },
+					{ -0.00497664F, 0.00484368F, 1.00001F } } };
+				g_cam.trans = { -0.0168549F, -0.00363235F, 0.000672147F };
+				REX::INFO("tuner: no camera pose file, using the built-in one (tune with the numpad on the Camera page, 5 saves)");
 			}
 		}
 		// the numpad tunes the camera pose only while the Camera page is shown (fully blended in)
