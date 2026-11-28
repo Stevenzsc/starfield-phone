@@ -644,6 +644,12 @@ namespace Stats
 			if (!ref) continue;
 			// the outpost's name lives in its beacon data; the reference's own name is the beacon object's
 			const auto  outpost = OutpostName(ref);
+			// the player's outposts are references made in play (FF......) and always get a name; beacons placed by the
+			// game or a mod (quest / fleet locations, templates) have neither: not the player's
+			if ((id >> 24) != 0xFF && outpost.empty()) {
+				if (logNames) REX::INFO("outpost {:08X}: skipped (placed by a plugin, no outpost name)", id);
+				continue;
+			}
 			const char* dn = ref->GetDisplayFullName();
 			const auto  refName = dn && *dn ? std::string(dn) : RefName(ref);
 			std::string name = !outpost.empty() ? outpost : refName;
