@@ -533,7 +533,7 @@ namespace
 
 	bool g_padNavHold = false;  // controller buttons used to open / close are still held
 
-	constexpr float kMusicDuck = 0.25f;  // music volume factor during dialogue
+	constexpr float kMusicDuck = 0.10f;  // music volume factor during dialogue
 
 	// a key or mouse button went down since the last check (checked every 50 ms; the task runs far more often)
 	bool KeyboardUsed()

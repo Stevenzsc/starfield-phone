@@ -243,7 +243,7 @@ namespace
 				++g_seq;
 				continue;  // drain the queue before polling
 			}
-			// duck fade: about 0.5 s from full to a quarter (steps of 0.06 every 40 ms)
+			// duck fade: about 0.6 s from full to a tenth (steps of 0.06 every 40 ms)
 			if (const float target = g_duckTarget.load(); std::abs(g_duck - target) > 0.001f) {
 				constexpr float kStep = 0.06f;
 				g_duck = g_duck < target ? std::min(target, g_duck + kStep) : std::max(target, g_duck - kStep);
