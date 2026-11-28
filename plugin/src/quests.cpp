@@ -42,7 +42,7 @@ namespace
 
 	const QuestType* TypeOf(const RE::TESForm* a_quest)
 	{
-		const auto raw = Read<std::uintptr_t>(a_quest, kQuestTypeKeyword);
+		const auto raw = *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(a_quest) + kQuestTypeKeyword);
 		std::uint32_t id = 0;
 		if (raw > 0xFFFFFFFFull) {
 			id = reinterpret_cast<const RE::TESForm*>(raw)->GetFormID();
