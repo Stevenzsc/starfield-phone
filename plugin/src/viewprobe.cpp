@@ -406,6 +406,21 @@ namespace
 		return g_texture != 0;
 	}
 
+	// Descriptor: inline binding array (4 x 0x18), +0x70 target object (none), +0x78 output. Queueing MOVES it
+	// (FUN_14083CCC0 empties the bindings and swaps in output 0xFFFFFF), so it is rebuilt before every queue;
+	// re-queueing the emptied one crashed the render graph.
+	bool FillDesc()
+	{
+		std::memset(g_desc, 0, sizeof(g_desc));
+		*reinterpret_cast<std::uint32_t*>(g_desc + 8) = 0x80000004;
+		*reinterpret_cast<std::uint32_t*>(g_desc + 0x78) = g_output;
+		if (!Call(kBindTexture, A(g_desc), kMainImageSlot, A(&g_texture))) {  // adds a texture reference
+			REX::ERROR("view2: binding the texture faulted");
+			return false;
+		}
+		return true;
+	}
+
 	bool BuildOutput()
 	{
 		const auto holder = Ptr(kWorldHolder.address());
@@ -440,12 +455,7 @@ namespace
 			REX::ERROR("view2: output setup faulted");
 			return false;
 		}
-		// descriptor: inline binding array (4 x 0x18), +0x70 target object (none), +0x78 output
-		std::memset(g_desc, 0, sizeof(g_desc));
-		*reinterpret_cast<std::uint32_t*>(g_desc + 8) = 0x80000004;
-		*reinterpret_cast<std::uint32_t*>(g_desc + 0x78) = g_output;
-		if (!Call(kBindTexture, A(g_desc), kMainImageSlot, A(&g_texture))) {
-			REX::ERROR("view2: binding the texture faulted");
+		if (!FillDesc()) {
 			return false;
 		}
 		REX::INFO("view2: output {:08X} ready (settings {}), desc {}", g_output, haveSettings, Hex(A(g_desc), 0x80));
@@ -501,6 +511,10 @@ namespace ViewProbe
 				return;
 			}
 			g_nextQueue = now + std::chrono::milliseconds(33);  // ~30 renders per second
+			if (g_queued > 0 && !FillDesc()) {
+				g_stage = Stage::kFailed;
+				return;
+			}
 			if (!Call(kQueueOutput, A(g_desc))) {
 				REX::ERROR("view2: queueing the output faulted");
 				g_stage = Stage::kFailed;
