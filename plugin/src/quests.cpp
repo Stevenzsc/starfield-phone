@@ -79,88 +79,58 @@ namespace
 	}
 }
 
+namespace
+{
+	// All forms by ID (TESForm::LookupByID, FUN_1405DE3B0, reads it): Address Library ID 883341 holds a pointer to a
+	// hash map; +0x10 entry array (0x18 bytes each: u32 form ID at +0, TESForm* at +8), +0x18 capacity,
+	// +0x30 BSReadWriteLock. CommonLibSF's TESDataHandler::formArrays looked empty for quests in this version.
+	constexpr REL::ID kAllFormsMap{ 883341 };
+	constexpr int     kQuestType = 91;  // form type byte (+0x2E) of MQ101, matches CommonLibSF's kQUST
+
+	std::vector<const RE::TESForm*> g_quests;  // every quest form, found once
+	bool                            g_scanned = false;
+
+	void ScanQuests()
+	{
+		g_scanned = true;
+		auto* map = *reinterpret_cast<std::uint8_t**>(kAllFormsMap.address());
+		if (!map) {
+			REX::WARN("quests: form map not ready");
+			g_scanned = false;
+			return;
+		}
+		auto* lock = reinterpret_cast<RE::BSReadWriteLock*>(map + 0x30);
+		lock->LockRead();
+		const auto* entries = *reinterpret_cast<const std::uint8_t* const*>(map + 0x10);
+		const auto  capacity = *reinterpret_cast<const std::uint64_t*>(map + 0x18);
+		std::uint64_t forms = 0;
+		for (std::uint64_t i = 0; entries && i < capacity && i < (1ull << 26); ++i) {
+			const auto* e = entries + i * 0x18;
+			const auto* form = *reinterpret_cast<const RE::TESForm* const*>(e + 8);
+			if (!form || *reinterpret_cast<const std::uint32_t*>(e) != form->GetFormID()) {
+				continue;  // empty slot
+			}
+			++forms;
+			if (Read<std::uint8_t>(form, 0x2E) == kQuestType) {
+				g_quests.push_back(form);
+			}
+		}
+		lock->UnlockRead();
+		REX::INFO("quests: scanned {} forms (map capacity {}), {} quests", forms, capacity, g_quests.size());
+	}
+}
+
 namespace Quests
 {
 	std::vector<Ui::QuestEntry> CollectActive(std::size_t a_maxQuests)
 	{
 		std::vector<Ui::QuestEntry> result;
-		auto*                       dh = RE::TESDataHandler::GetSingleton();
-		if (!dh) {
-			return result;
+		if (!g_scanned) {
+			ScanQuests();
 		}
-		// CommonLibSF's FormType::kQUST is not this game version's index (its form array was empty in game). Take
-		// the real type from a quest that always exists (MQ101, Starfield.esm 00003448) and find the matching array.
-		static int questArray = -1;
-		if (questArray < 0) {
-			const auto* mq101 = RE::TESForm::LookupByID(0x00003448);
-			if (!mq101) {
-				REX::WARN("quests: MQ101 not found");
-				return result;
-			}
-			const auto type = Read<std::uint8_t>(mq101, 0x2E);
-			constexpr int total = int(std::size(dh->formArrays));
-			auto matches = [&](int a_index) {
-				auto& arr = dh->formArrays[a_index].formArray;
-				return arr.size() > 0 && arr[0].get() && Read<std::uint8_t>(arr[0].get(), 0x2E) == type;
-			};
-			if (type < total && matches(type)) {
-				questArray = type;
-			} else {
-				for (int i = 0; i < total; ++i) {
-					if (matches(i)) {
-						questArray = i;
-						break;
-					}
-				}
-			}
-			REX::INFO("quests: MQ101 form type {} (CommonLibSF kQUST {}), using form array {}", type,
-				std::to_underlying(RE::FormType::kQUST), questArray);
-			if (questArray < 0) {
-				questArray = 0x7FFF;  // don't search again
-			}
-		}
-		if (questArray == 0x7FFF) {
-			return result;
-		}
-		auto& fa = dh->formArrays[questArray];
-		fa.lock.LockRead();
-
-		// one-time diagnosis (the first version found nothing): what is in this form array?
-		static bool logged = false;
-		if (!logged) {
-			logged = true;
-			std::uint32_t withObjectives = 0, withDisplayed = 0, flagged = 0;
-			for (std::uint32_t i = 0; i < fa.formArray.size(); ++i) {
-				const RE::TESForm* q = fa.formArray[i].get();
-				if (!q) continue;
-				const auto count = Read<std::uint32_t>(q, kObjCount);
-				const auto objs = Read<const void* const*>(q, kObjArray);
-				if (Read<std::uint32_t>(q, kQuestFlags) & 1) ++flagged;
-				if (!objs || count == 0 || count > 1024) continue;
-				++withObjectives;
-				for (std::uint32_t k = 0; k < count; ++k) {
-					if (objs[k] && Read<int>(objs[k], kObjState) == kStateDisplayed) {
-						++withDisplayed;
-						break;
-					}
-				}
-			}
-			REX::INFO("quests diag: array QUST size {}, flag bit0 set {}, with objectives {}, with displayed objective {}",
-				fa.formArray.size(), flagged, withObjectives, withDisplayed);
-			for (std::uint32_t i = 0; i < fa.formArray.size() && i < 3; ++i) {
-				const RE::TESForm* q = fa.formArray[i].get();
-				if (!q) continue;
-				REX::INFO("quests diag: [{}] type {} id {:08X} '{}' flags114 {:08X} objCount {}", i,
-					Read<std::uint8_t>(q, 0x2E), q->GetFormID(), q->GetFormEditorID() ? q->GetFormEditorID() : "",
-					Read<std::uint32_t>(q, kQuestFlags), Read<std::uint32_t>(q, kObjCount));
-			}
-		}
-
-		for (std::uint32_t i = 0; i < fa.formArray.size() && result.size() < a_maxQuests; ++i) {
-			const RE::TESForm* q = fa.formArray[i].get();
-			// no running-flag filter: a displayed in-progress objective is enough (the bit-0 guess found nothing)
-			if (!q) {
-				continue;
+		for (const RE::TESForm* q : g_quests) {
+			if (result.size() >= a_maxQuests) {
+				break;
 			}
 			const auto count = Read<std::uint32_t>(q, kObjCount);
 			const auto objs = Read<const void* const*>(q, kObjArray);
@@ -182,14 +152,12 @@ namespace Quests
 			if (entry.objectives.empty()) {
 				continue;
 			}
-			const char* name = QuestName(q);
-			entry.name = Clean(name);
+			entry.name = Clean(QuestName(q));
 			if (entry.name.empty()) {
 				entry.name = q->GetFormEditorID() ? q->GetFormEditorID() : "?";
 			}
 			result.push_back(std::move(entry));
 		}
-		fa.lock.UnlockRead();
 		return result;
 	}
 }
