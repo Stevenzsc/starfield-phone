@@ -7,6 +7,7 @@
 // This file does not use CommonLibSF.
 
 #include "ui.h"
+#include "gamepad.h"
 #include "lang.h"
 #include "gallery.h"
 #include "music.h"
@@ -35,6 +36,7 @@
 #include <iterator>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -427,6 +429,7 @@ namespace
 		bool vibration = true;
 		int  musicVolume = 60;
 		int  language = 2;  // Lang mode: 0 auto, 1 中文, 2 English (default)
+		int  padOpen = 1;   // Gamepad::Open
 		// quests
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
 		int detailScroll = 0; // first objective row on the quest details page
@@ -509,7 +512,7 @@ namespace
 	constexpr OpenKey kOpenKeys[] = {
 		{ 0x76, "F7" }, { 0x75, "F6" }, { 0x79, "F10" }, { 0x2D, "Insert" }, { 0x24, "Home" }, { 0x23, "End" },
 	};
-	constexpr int kSettingsRows = 5;  // brightness, open key, button sounds, rumble, language
+	constexpr int kSettingsRows = 6;  // brightness, open key, button sounds, rumble, language, controller open
 
 	std::mutex g_lock;
 	State      g_state;     // latest values (guarded)
@@ -901,8 +904,22 @@ namespace
 	// button prompts along the bottom, right-aligned like the game's ([Enter] Select); returns the bar's top y
 	// a_top < 0: bar along the bottom, returns its top y; a_top >= 0: bar starting at a_top (rule below it), returns
 	// the y under it
-	int Prompts(Canvas& c, std::initializer_list<Prompt> a_items, int a_top = -1)
+	std::atomic_bool g_padPrompts{ false };  // last navigation came from the controller
+
+	// key label as shown: the controller's button when the pad is in use
+	const char* PromptKey(const char* a_key)
 	{
+		if (!g_padPrompts.load()) return a_key;
+		const std::string_view k = a_key;
+		if (k == "Enter") return "A";
+		if (k == Tr("退格") || k == "退格") return "B";
+		return a_key;  // arrows stay (D-pad)
+	}
+
+	int Prompts(Canvas& c, std::initializer_list<Prompt> a_list, int a_top = -1)
+	{
+		std::vector<Prompt> a_items(a_list);
+		for (auto& p : a_items) p.key = PromptKey(p.key);
 		const float H = float(c.h);
 		const int   pad = Pad(c);
 		float       f = std::max(12.0f, H * 0.034f);
@@ -1018,9 +1035,10 @@ namespace
 		const float f = std::max(13.0f, H * 0.044f);
 		char        bright[16];
 		std::snprintf(bright, sizeof(bright), "%d%%", s.brightness);
-		const char* labels[kSettingsRows] = { Tr("屏幕亮度"), Tr("打开手机"), Tr("按键音效"), Tr("手柄震动"), Lang::English() ? "Language" : "语言 / Language" };
+		const char* labels[kSettingsRows] = { Tr("屏幕亮度"), Tr("打开手机"), Tr("按键音效"), Tr("手柄震动"), Lang::English() ? "Language" : "语言 / Language",
+			Tr("手柄打开") };
 		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name, s.sound ? Tr("开") : Tr("关"), s.vibration ? Tr("开") : Tr("关"),
-			Lang::ModeName(s.language) };
+			Lang::ModeName(s.language), Tr(Gamepad::OpenName(Gamepad::Open(s.padOpen))) };
 		const FRect box = SelBox(kSettingsPage, { pad, y + s.setSel * rowH, c.w - 2 * pad, rowH - 2 });
 		for (int i = 0; i < kSettingsRows; ++i) {
 			if (!Covered(box, pad, y + i * rowH, c.w - 2 * pad, rowH - 2)) {
@@ -2351,9 +2369,12 @@ namespace Ui
 					st.sound = !st.sound;
 				} else if (st.setSel == 3) {
 					st.vibration = !st.vibration;
-				} else {
+				} else if (st.setSel == 4) {
 					st.language = (st.language + dir + 3) % 3;  // auto / 中文 / English
 					Lang::SetMode(st.language);
+				} else {
+					const int k = int(Gamepad::Open::kCount);
+					st.padOpen = (st.padOpen + dir + k) % k;
 				}
 				act = Action::kSettingsChanged;
 				break;
@@ -2665,6 +2686,20 @@ namespace Ui
 
 	bool Animating() { return g_animating.load(); }
 
+	bool AtHome()
+	{
+		std::lock_guard lk(g_lock);
+		return g_state.page == kHome;
+	}
+
+	void SetPadPrompts(bool a_pad)
+	{
+		if (g_padPrompts.exchange(a_pad) != a_pad) {
+			std::lock_guard lk(g_lock);
+			++g_version;  // redraw the prompt bar
+		}
+	}
+
 	bool CameraTarget(int& a_w, int& a_h)
 	{
 		a_w = g_camW.load();
@@ -2830,7 +2865,7 @@ namespace Ui
 	Settings GetSettings()
 	{
 		std::lock_guard lk(g_lock);
-		return { g_state.brightness, g_state.openKey, g_state.sound, g_state.vibration, g_state.musicVolume, g_state.language };
+		return { g_state.brightness, g_state.openKey, g_state.sound, g_state.vibration, g_state.musicVolume, g_state.language, g_state.padOpen };
 	}
 
 	void SetSettings(const Settings& a_settings)
@@ -2843,6 +2878,7 @@ namespace Ui
 		g_state.musicVolume = std::clamp(a_settings.musicVolume, 0, 100);
 		g_state.language = std::clamp(a_settings.language, 0, 2);
 		Lang::SetMode(g_state.language);
+		g_state.padOpen = std::clamp(a_settings.padOpen, 0, int(Gamepad::Open::kCount) - 1);
 		Music::SetVolume(g_state.musicVolume);
 		++g_version;
 	}

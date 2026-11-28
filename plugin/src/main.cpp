@@ -24,6 +24,7 @@
 #include "pch.h"
 #include "lang.h"
 #include "camera.h"
+#include "gamepad.h"
 #include "gallery.h"
 #include "screen.h"
 #include "tuner.h"
@@ -165,6 +166,8 @@ namespace
 				st.musicVolume = std::atoi(line.c_str() + 13);
 			} else if (line.rfind("language=", 0) == 0) {
 				st.language = std::atoi(line.c_str() + 9);
+			} else if (line.rfind("pad_open=", 0) == 0) {
+				st.padOpen = std::atoi(line.c_str() + 9);
 			} else if (line.rfind("dev_keys=", 0) == 0) {
 				g_devKeys = std::atoi(line.c_str() + 9) != 0;
 			}
@@ -208,7 +211,8 @@ namespace
 					line.pop_back();
 				}
 				const bool ours = line.rfind("brightness=", 0) == 0 || line.rfind("open_key=", 0) == 0 || line.rfind("sound=", 0) == 0 ||
-				                  line.rfind("vibration=", 0) == 0 || line.rfind("music_volume=", 0) == 0 || line.rfind("language=", 0) == 0;
+				                  line.rfind("vibration=", 0) == 0 || line.rfind("music_volume=", 0) == 0 || line.rfind("language=", 0) == 0 ||
+				                  line.rfind("pad_open=", 0) == 0;
 				if (!ours) {
 					lines.push_back(line);
 				}
@@ -220,11 +224,42 @@ namespace
 		lines.push_back(std::string("vibration=") + (st.vibration ? "1" : "0"));
 		lines.push_back("music_volume=" + std::to_string(st.musicVolume));
 		lines.push_back("language=" + std::to_string(st.language));
+		lines.push_back("pad_open=" + std::to_string(st.padOpen));
 		std::ofstream out(kIniPath, std::ios::trunc);
 		for (const auto& l : lines) {
 			out << l << '\n';
 		}
 		REX::INFO("settings saved: brightness {}% open key {}", st.brightness, Ui::OpenKeyName(st.openKey));
+	}
+
+	// While the phone is out, the game must not act on the buttons the phone uses (controller A / B / D-pad):
+	// an input enable layer, the mechanism behind Papyrus InputEnableLayer.DisablePlayerControls (native
+	// FUN_142024A90 calls EnableUserEvent ID 63121 / EnableOtherEvent ID 65852 on the layer; layer from
+	// BSInputEnableManager::AllocateNewLayer ID 124211, manager ID 938036). Walking and looking stay enabled.
+	RE::BSInputEnableLayer* g_inputLayer = nullptr;
+	bool                    g_inputBlocked = false;
+
+	void BlockGameInput(bool a_block)
+	{
+		if (a_block == g_inputBlocked) {
+			return;
+		}
+		auto* mgr = RE::BSInputEnableManager::GetSingleton();
+		if (!mgr) {
+			return;
+		}
+		if (!g_inputLayer && !mgr->AllocateNewLayer(&g_inputLayer, "PhoneTest")) {
+			REX::WARN("input: could not allocate an input enable layer");
+			return;
+		}
+		using UF = RE::USER_EVENT_FLAG;
+		using OF = RE::OTHER_EVENT_FLAG;
+		const auto user = UF::Fighting | UF::Sneaking | UF::Jumping;
+		const auto other = OF::Activate | OF::Favorites | OF::HandScanner | OF::VATS | OF::CamSwitch;
+		g_inputLayer->EnableUserEvent(user, !a_block, RE::USER_EVENT_SENDER_ID::Script);
+		g_inputLayer->EnableOtherEvent(other, !a_block, RE::USER_EVENT_SENDER_ID::Script);
+		g_inputBlocked = a_block;
+		REX::INFO("input: game controls {} (layer {})", a_block ? "blocked" : "restored", g_inputLayer->GetLayerID());
 	}
 
 	// controller rumble, if enabled in the Settings app
@@ -372,6 +407,7 @@ namespace
 			}
 			Screen::SetActive(g_open);
 			Camera::SetActive(g_open);
+			BlockGameInput(g_open);
 		} else if (g_open && a_b.formID != 0x0001901F) {
 			// The engine refuses to close a slate the player is not holding. That happens after a save was
 			// loaded while the phone was open: our state survives the load, the player's hands do not.
@@ -380,6 +416,7 @@ namespace
 			g_open = false;
 			Screen::SetActive(false);
 			Camera::SetActive(false);
+			BlockGameInput(false);
 		}
 		return ok;
 	}
@@ -493,6 +530,68 @@ namespace
 		return edge;
 	}
 
+	bool g_padNavHold = false;  // controller buttons used to open / close are still held
+
+	// take the phone out or put it away (open key, controller gesture, B on the home screen)
+	void TogglePhone()
+	{
+		const auto ready = g_lastAction + kActionGap;
+		if (std::chrono::steady_clock::now() < ready) {
+			// the raise / lower animation is still playing: an action now freezes the view (seen in game) -> queue it
+			g_steps.push_back({ ready, std::size_t(g_open ? 1 : 0) });
+		} else if (g_open) {
+			if (!Perform(kBindings[1]) && !g_open) {
+				Perform(kBindings[0]);  // the close failed on a stale state: the user wants the phone, open it
+			}
+		} else if (!g_preloaded) {
+			QueuePreloadOpen();  // first open of this model shows nothing; open, close, open
+			g_preloaded = true;
+		} else {
+			Perform(kBindings[0]);
+		}
+	}
+
+	// one navigation key for the phone UI, and what its action asks for
+	void Navigate(Ui::Key a_key)
+	{
+		Ui::Feedback fb = Ui::Feedback::kNone;
+		const auto   act = Ui::Input(a_key, &fb);
+		PlayFeedback(fb);
+		switch (act) {
+		case Ui::Action::kSettingsChanged:
+			SaveSettings();
+			break;
+		case Ui::Action::kToggleTrack: {
+			const auto sel = Ui::SelectedQuest();
+			if (sel.formID) {
+				Quests::SetTracked(sel.formID, !sel.tracked);
+				Ui::SetQuests(Quests::CollectActive(40));  // show the new state right away
+			}
+			break;
+		}
+		case Ui::Action::kSummonContact: {
+			const auto who = Ui::SelectedContact();
+			if (who.formID && Stats::Summon(who.formID)) {
+				Ui::SetCallResult(Tr("“收到，马上到。”"));
+				Buzz(0.3f, 0.3f, 0.2f);
+			}
+			break;
+		}
+		case Ui::Action::kTakePhoto:
+			// the photo comes from the same source as the viewfinder (the second view once it renders)
+			Camera::RequestPhoto();
+			Buzz(0.6f, 0.0f, 0.08f);  // shutter click
+			break;
+		case Ui::Action::kOpenPhotoMode:
+			// put the phone away, then open photo mode once the hand is down
+			Perform(kBindings[1]);
+			g_steps.push_back({ std::chrono::steady_clock::now() + std::chrono::milliseconds(1500), kStepPhotoMode });
+			break;
+		default:
+			break;
+		}
+	}
+
 	// Runs on the game's task queue: poll the hotkeys, act on key-down edges.
 	void Tick()
 	{
@@ -501,23 +600,20 @@ namespace
 		}
 		// open key (Settings app; default F7) toggles the phone; F8 also puts it away
 		if (KeyEdge(Ui::OpenKeyVk(Ui::GetSettings().openKey), g_openKeyDown) && g_steps.empty()) {
-			const auto ready = g_lastAction + kActionGap;
-			if (std::chrono::steady_clock::now() < ready) {
-				// the raise / lower animation is still playing: an action now freezes the view (seen in game) -> queue it
-				g_steps.push_back({ ready, std::size_t(g_open ? 1 : 0) });
-			} else if (g_open) {
-				if (!Perform(kBindings[1]) && !g_open) {
-					Perform(kBindings[0]);  // the close failed on a stale state: the user wants the phone, open it
-				}
-			} else if (!g_preloaded) {
-				QueuePreloadOpen();  // first open of this model shows nothing; open, close, open
-				g_preloaded = true;
-			} else {
-				Perform(kBindings[0]);
-			}
+			TogglePhone();
 		}
 		if (KeyEdge(kBindings[1].vkey, g_down[1]) && g_open) {
 			Perform(kBindings[1]);
+		}
+
+		// controller: the chosen gesture toggles the phone; D-pad / A / B navigate while it is out
+		Gamepad::Update();
+		if (Gamepad::OpenGesture(Gamepad::Open(Ui::GetSettings().padOpen)) && g_steps.empty()) {
+			TogglePhone();
+			g_padNavHold = true;  // the gesture's buttons are still down: no navigation until they are released
+		}
+		if (g_padNavHold && Gamepad::Any() == 0) {
+			g_padNavHold = false;
 		}
 
 		// phone navigation: arrows, Enter, Backspace (unbound in the game by default)
@@ -527,44 +623,33 @@ namespace
 				{ 0x27, Ui::Key::kRight }, { 0x0D, Ui::Key::kEnter }, { 0x08, Ui::Key::kBack },
 			};
 			for (std::size_t i = 0; i < std::size(nav); ++i) {
-				if (!KeyEdge(nav[i].first, g_navDown[i])) {
-					continue;
+				if (KeyEdge(nav[i].first, g_navDown[i])) {
+					Ui::SetPadPrompts(false);
+					Navigate(nav[i].second);
 				}
-				Ui::Feedback fb = Ui::Feedback::kNone;
-				const auto   act = Ui::Input(nav[i].second, &fb);
-				PlayFeedback(fb);
-				switch (act) {
-				case Ui::Action::kSettingsChanged:
-					SaveSettings();
-					break;
-				case Ui::Action::kToggleTrack: {
-					const auto sel = Ui::SelectedQuest();
-					if (sel.formID) {
-						Quests::SetTracked(sel.formID, !sel.tracked);
-						Ui::SetQuests(Quests::CollectActive(40));  // show the new state right away
+			}
+			if (!g_padNavHold) {
+				constexpr std::pair<std::uint32_t, Ui::Key> padNav[] = {
+					{ Gamepad::kUp, Ui::Key::kUp }, { Gamepad::kDown, Ui::Key::kDown }, { Gamepad::kLeft, Ui::Key::kLeft },
+					{ Gamepad::kRight, Ui::Key::kRight },
+				};
+				for (const auto& [button, key] : padNav) {
+					if (Gamepad::Repeat(button)) {
+						Ui::SetPadPrompts(true);
+						Navigate(key);
 					}
-					break;
 				}
-				case Ui::Action::kSummonContact: {
-					const auto who = Ui::SelectedContact();
-					if (who.formID && Stats::Summon(who.formID)) {
-						Ui::SetCallResult(Tr("“收到，马上到。”"));
-						Buzz(0.3f, 0.3f, 0.2f);
+				if (Gamepad::Pressed(Gamepad::kA)) {
+					Ui::SetPadPrompts(true);
+					Navigate(Ui::Key::kEnter);
+				}
+				if (Gamepad::Pressed(Gamepad::kB)) {
+					Ui::SetPadPrompts(true);
+					if (Ui::AtHome()) {
+						TogglePhone();  // B on the home screen puts the phone away
+					} else {
+						Navigate(Ui::Key::kBack);
 					}
-					break;
-				}
-				case Ui::Action::kTakePhoto:
-					// the photo comes from the same source as the viewfinder (the second view once it renders)
-					Camera::RequestPhoto();
-					Buzz(0.6f, 0.0f, 0.08f);  // shutter click
-					break;
-				case Ui::Action::kOpenPhotoMode:
-					// put the phone away, then open photo mode once the hand is down
-					Perform(kBindings[1]);
-					g_steps.push_back({ std::chrono::steady_clock::now() + std::chrono::milliseconds(1500), kStepPhotoMode });
-					break;
-				default:
-					break;
 				}
 			}
 		} else {
@@ -677,6 +762,15 @@ namespace
 			}
 			// a save load (or fast travel, sleep) moves the game clock: record the new state without messages
 			const bool silent = gameHours < 0 || hours < gameHours || hours - gameHours > 2.0;
+			if (silent && gameHours >= 0 && g_open) {
+				// a save load (the clock jumped) drops the phone from the hands: drop our open state and give the
+				// controls back, else the blocked controls would outlive the phone
+				REX::INFO("phone: game clock jumped while the phone was out (load?); reset to closed");
+				g_open = false;
+				Screen::SetActive(false);
+				Camera::SetActive(false);
+				BlockGameInput(false);
+			}
 			gameHours = hours;
 			bool buzz = false;
 			for (auto& ch : Quests::PollChanges(silent)) {

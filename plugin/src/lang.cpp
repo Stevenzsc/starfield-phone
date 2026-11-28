@@ -71,6 +71,10 @@ namespace
 			{ "语言", "Language" },
 			{ "自动", "Auto" },
 			{ "中文", "中文" },
+			{ "手柄打开", "Pad opens" },
+			{ "长按十字键下", "Hold D-pad down" },
+			{ "长按 View", "Hold View" },
+			{ "按下双摇杆", "Click both sticks" },
 			// camera / gallery
 			{ "取景中…", "Framing…" },
 			{ "已保存", "Saved" },

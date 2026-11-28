@@ -55,6 +55,8 @@ namespace Ui
 	Action Input(Key a_key, Feedback* a_feedback = nullptr);  // from the game's task thread while the phone is open
 	void   OnOpen();          // phone taken out: back to the home screen
 	bool   Animating();       // a page transition or the banner is moving: write the screen at a higher rate
+	bool   AtHome();          // the home screen is shown (controller B there puts the phone away)
+	void   SetPadPrompts(bool a_pad);  // button prompts as controller buttons (A / B) instead of keys
 
 	// ---- settings (Settings app; saved in PhoneTest.ini) ----
 	struct Settings
@@ -65,6 +67,7 @@ namespace Ui
 		bool vibration = true;   // controller rumble
 		int  musicVolume = 60;   // Music app, percent
 		int  language = 2;       // 0 auto (game text language), 1 中文, 2 English (default)
+		int  padOpen = 1;        // Gamepad::Open: how the controller takes the phone out (0 off)
 	};
 	Settings    GetSettings();
 	void        SetSettings(const Settings& a_settings);
