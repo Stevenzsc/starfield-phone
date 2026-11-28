@@ -1106,7 +1106,7 @@ namespace
 				reinterpret_cast<std::uintptr_t>(vtbl));
 			return;
 		}
-		REX::INFO("arm: no pose component above the clavicle: the arm is driven by its NiNodes (task writes)");
+		REX::INFO("arm: no pose component above the clavicle (the NiNodes drive the arm)");
 	}
 
 	// ---- the reliable point: the player's 1st-person 3D update ----
@@ -1143,14 +1143,16 @@ namespace
 		}
 		g_armWeight = a_weight;
 		FindPoseComponent();
-		// Two skeleton states were seen. With a pose component above the clavicle (HumanExportRoot, 473 bones) the
-		// component computes the bones and PoseUpdate_Hook does the work. Without one, the NiNode transforms are
-		// consistent (world = localRot * parentRot, zero error) and the method of the in-game tuning session works:
-		// offsets into the locals from the task, arm subtree worlds recomputed.
-		if (!g_poseComp.load()) {
-			for (int b = 0; b < kBones; ++b) {
-				ApplyBoneOffset(b);
-			}
+		// The skeleton root's Update (FUN_142419B00) decides EVERY FRAME whether the pose component computes the bones
+		// (update flag bit 4 + the component's own state) or plain NiNode::Update (FUN_142BD21E0) does. Sessions were
+		// seen with no component, with a component that drives the bones, and with a component that is never called.
+		// So both paths run all the time: PoseUpdate_Hook poses the arm when the component runs, and the task writes
+		// the NiNodes (offsets into the locals, arm subtree worlds recomputed), which is what shows when the NiNodes
+		// drive the arm and is harmless when they are only copies.
+		for (int b = 0; b < kBones; ++b) {
+			ApplyBoneOffset(b);
+		}
+		{
 			auto* top = g_arm.bones[0].node;
 			UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
 		}
