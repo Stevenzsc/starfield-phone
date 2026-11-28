@@ -546,16 +546,30 @@ namespace
 		return e;
 	}
 
-	void UpdateSubtreeWorld(RE::NiAVObject* a_obj, int a_conv, int a_depth = 0)
+	// Recompute world transforms below a bone. Only objects of the bone's own class (NiNode, same vtable) are
+	// descended into; the phone root's children (geometry) only get their own world. Descending into geometry as if
+	// it had a children array crashed the game.
+	void UpdateSubtreeWorld(RE::NiAVObject* a_obj, int a_conv, const void* a_nodeVtbl, int a_depth = 0)
 	{
-		if (!a_obj || !a_obj->parent || a_depth > 16) {
+		if (!a_obj || !a_obj->parent || a_depth > 24) {
 			return;
 		}
 		ComposeWorld(a_obj->parent->world, a_obj->local, a_conv, a_obj->world);
+		const void* vtbl = *reinterpret_cast<void* const*>(a_obj);
+		const bool  isPhone = a_obj == g_root.get();
+		if (vtbl != a_nodeVtbl && !isPhone) {
+			return;
+		}
+		if (isPhone) {
+			for (auto* c : g_children) {
+				if (c) ComposeWorld(a_obj->world, c->local, a_conv, c->world);
+			}
+			return;
+		}
 		std::uint16_t count = 0;
 		auto* const*  kids = Children(a_obj, count);
 		for (std::uint16_t i = 0; kids && i < count && i < 64; ++i) {
-			UpdateSubtreeWorld(kids[i], a_conv, a_depth + 1);
+			UpdateSubtreeWorld(kids[i], a_conv, a_nodeVtbl, a_depth + 1);
 		}
 	}
 
@@ -623,7 +637,7 @@ namespace
 		biceps->local = out;
 		g_arm.written = out;
 		g_arm.haveWritten = true;
-		UpdateSubtreeWorld(biceps, g_arm.conv);
+		UpdateSubtreeWorld(biceps, g_arm.conv, *reinterpret_cast<void* const*>(biceps));
 
 		const auto now = std::chrono::steady_clock::now();
 		if (now >= g_arm.nextLog) {
@@ -638,7 +652,7 @@ namespace
 	{
 		if (g_arm.biceps && g_arm.haveWritten && SameXf(g_arm.biceps->local, g_arm.written)) {
 			g_arm.biceps->local = g_arm.animLocal;  // nothing rewrote it: put the animation's value back
-			UpdateSubtreeWorld(g_arm.biceps, g_arm.conv);
+			UpdateSubtreeWorld(g_arm.biceps, g_arm.conv, *reinterpret_cast<void* const*>(g_arm.biceps));
 		}
 		g_arm = {};
 	}
