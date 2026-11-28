@@ -271,7 +271,8 @@ namespace
 		g_preloaded = true;
 	}
 
-	void Perform(const Binding& a_b)
+	// Returns true when the engine performed the action.
+	bool Perform(const Binding& a_b)
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
 		auto* form = RE::TESForm::LookupByID(a_b.formID);
@@ -279,12 +280,12 @@ namespace
 
 		if (!player || !form || !fn) {
 			REX::WARN("{}: missing player={} form={} fn={}", a_b.name, (void*)player, (void*)form, (void*)fn);
-			return;
+			return false;
 		}
 		const auto type = *reinterpret_cast<const std::uint8_t*>(reinterpret_cast<std::uintptr_t>(form) + 0x2E);
 		if (type != kFormTypeAACT) {
 			REX::WARN("{}: form {:08X} has type {} (expected AACT = {})", a_b.name, a_b.formID, type, kFormTypeAACT);
-			return;
+			return false;
 		}
 
 		ActionData data;
@@ -306,7 +307,16 @@ namespace
 			}
 			Screen::SetActive(g_open);
 			Camera::SetActive(g_open);
+		} else if (g_open && a_b.formID != 0x0001901F) {
+			// The engine refuses to close a slate the player is not holding. That happens after a save was
+			// loaded while the phone was open: our state survives the load, the player's hands do not.
+			// Drop the stale state, otherwise every key press would only retry the close.
+			REX::INFO("phone state was stale (not held any more, e.g. after a load); reset to closed");
+			g_open = false;
+			Screen::SetActive(false);
+			Camera::SetActive(false);
 		}
+		return ok;
 	}
 
 	// PhoneTest.ini camera_crop=x0,y0,x1,y1 (fractions of the screen) and camera_hide_hud=0/1, re-read every second
@@ -431,7 +441,9 @@ namespace
 				// the raise / lower animation is still playing: an action now freezes the view (seen in game) -> queue it
 				g_steps.push_back({ ready, std::size_t(g_open ? 1 : 0) });
 			} else if (g_open) {
-				Perform(kBindings[1]);
+				if (!Perform(kBindings[1]) && !g_open) {
+					Perform(kBindings[0]);  // the close failed on a stale state: the user wants the phone, open it
+				}
 			} else if (!g_preloaded) {
 				QueuePreloadOpen();  // first open of this model shows nothing; open, close, open
 				g_preloaded = true;
