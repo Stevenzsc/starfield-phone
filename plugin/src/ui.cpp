@@ -871,7 +871,16 @@ namespace
 	{
 		const float H = float(c.h);
 		const int   pad = Pad(c);
-		const float f = std::max(12.0f, H * 0.034f);
+		float       f = std::max(12.0f, H * 0.034f);
+		// longer (English) labels: shrink the whole bar until it fits between the margins
+		auto width = [&](float a_f) {
+			int w = 0;
+			for (const auto& p : a_items) {
+				w += TextWidth(p.label, a_f) + TextWidth(p.key, a_f * 0.85f) + int(a_f * 0.8f) + int(a_f * 0.4f) + int(a_f * 1.1f);
+			}
+			return w - int(a_f * 1.1f);
+		};
+		while (f > 8.0f && width(f) > c.w - 2 * pad) f *= 0.94f;
 		const int   barH = int(H * 0.08f);
 		const int   top = c.h - barH;
 		Rect(c, pad, top, c.w - 2 * pad, 1, kLine);
@@ -949,7 +958,10 @@ namespace
 			} else {
 				TextCentered(c, x + tile / 2, y + tile / 2 - int(tile * 0.24f), a.glyph, tile * 0.42f, fg);
 			}
-			TextCentered(c, x + tile / 2, y + tile + int(labelF * 0.3f), Tr(a.label), labelF, sel ? kText : kDim);
+			// shrink a label that is wider than its column (English names)
+			float lf = labelF;
+			while (lf > 8.0f && TextWidth(Tr(a.label), lf) > pitch - std::max(4, gapX / 2)) lf *= 0.94f;
+			TextCentered(c, x + tile / 2, y + tile + int(labelF * 0.3f) + int((labelF - lf) * 0.5f), Tr(a.label), lf, sel ? kText : kDim);
 			if (i == kAppMessages && g_unread > 0) {  // unread badge on the Messages tile
 				char n[8];
 				std::snprintf(n, sizeof(n), "%d", std::min(g_unread, 99));
