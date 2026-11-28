@@ -6,6 +6,7 @@
 // This file does not use CommonLibSF.
 
 #include "ui.h"
+#include "gallery.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #if __has_include(<stb_truetype.h>)
@@ -24,6 +25,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -262,7 +264,7 @@ namespace
 		{ "前哨站", "哨", { 48, 200, 200 }, { 10, 140, 150 } },
 		{ "飞船", "船", { 175, 82, 222 }, { 120, 50, 180 } },
 		{ "相机", "相", { 142, 142, 147 }, { 90, 90, 98 } },
-		{ "音乐", "乐", { 255, 69, 120 }, { 210, 30, 80 } },
+		{ "相册", "册", { 255, 69, 120 }, { 210, 30, 80 } },
 		{ "设置", "设", { 100, 116, 139 }, { 60, 72, 92 } },
 	};
 
@@ -283,6 +285,9 @@ namespace
 		int openKey = 0;
 		// quests
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
+		// gallery
+		int  galIndex = 0;         // shown photo (0 = newest)
+		bool galConfirm = false;   // Enter pressed once: the next Enter deletes
 		// safe area (fractions of the upright screen)
 		float insetL = 0, insetT = 0, insetR = 0, insetB = 0;
 	};
@@ -293,6 +298,7 @@ namespace
 		kSettingsPage,
 		kQuestsPage,
 		kCameraPage,
+		kGalleryPage,
 		kPlaceholderPage,
 	};
 
@@ -302,6 +308,7 @@ namespace
 		switch (a_app) {
 		case 1: return kQuestsPage;
 		case 5: return kCameraPage;
+		case 6: return kGalleryPage;
 		case 7: return kSettingsPage;
 		default: return kPlaceholderPage;
 		}
@@ -339,6 +346,13 @@ namespace
 	std::uint32_t             g_drawnCamSeq = 0;
 	std::atomic_bool          g_camOpen{ false };
 	std::atomic_int           g_camW{ 0 }, g_camH{ 0 };
+
+	// gallery: file list (g_lock); the decoded photo comes from a worker thread (g_camLock, bumps g_camSeq)
+	std::vector<std::wstring> g_galFiles;
+	std::wstring              g_galImgPath;  // photo in g_galImg (or being loaded)
+	std::vector<std::uint8_t> g_galImg;      // RGBA8; empty = could not be opened
+	int                       g_galImgW = 0, g_galImgH = 0, g_galImgMaxW = 0, g_galImgMaxH = 0;
+	bool                      g_galLoading = false;
 
 	void DrawHome(Canvas& c, const State& s)
 	{
@@ -492,6 +506,74 @@ namespace
 		DrawHint(c, "回车 拍照   ↑ 拍照模式");
 	}
 
+	// one photo at a time, newest first; decoded on a worker thread
+	void DrawGallery(Canvas& c, const State& s)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const float f = std::max(12.0f, H * 0.036f);
+		Text(c, int(W * 0.045f), int(H * 0.02f), "‹ 退格返回", f, { 200, 210, 230 }, 0.9f);
+		const int n = int(g_galFiles.size());
+		if (!n) {
+			TextCentered(c, c.w / 2, int(H * 0.4f), "还没有照片", std::max(16.0f, H * 0.055f), { 255, 255, 255 });
+			TextCentered(c, c.w / 2, int(H * 0.4f) + int(H * 0.08f), "在相机里按回车拍照", f, { 190, 200, 220 }, 0.9f);
+			return;
+		}
+		const int   idx = std::clamp(s.galIndex, 0, n - 1);
+		const auto& path = g_galFiles[idx];
+		const int   vx = int(W * 0.03f), vy = int(H * 0.075f);
+		const int   vw = c.w - 2 * vx, vh = int(H * 0.7f);
+		RoundRect(c, vx, vy, vw, vh, 0, { 0, 0, 0 }, { 0, 0, 0 }, 0.85f);
+		{
+			std::lock_guard lk(g_camLock);
+			const bool current = g_galImgPath == path && g_galImgMaxW == vw && g_galImgMaxH == vh;
+			if (current && !g_galLoading) {
+				if (g_galImg.empty()) {
+					TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "无法打开", f * 1.2f, { 255, 160, 160 });
+				} else {
+					const int ox = vx + (vw - g_galImgW) / 2, oy = vy + (vh - g_galImgH) / 2;
+					for (int y = 0; y < g_galImgH && oy + y < c.h; ++y) {
+						std::memcpy(&c.px[(std::size_t(oy + y) * c.w + ox) * 4], &g_galImg[std::size_t(y) * g_galImgW * 4],
+							std::size_t(g_galImgW) * 4);
+					}
+				}
+			} else {
+				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "加载中…", f * 1.2f, { 220, 220, 230 });
+				if (!g_galLoading) {
+					g_galLoading = true;
+					g_galImgPath = path;
+					g_galImgMaxW = vw;
+					g_galImgMaxH = vh;
+					std::thread([path, vw, vh] {
+						std::vector<std::uint8_t> px;
+						int                       w = 0, h = 0;
+						if (!Gallery::Load(path, vw, vh, px, w, h)) {
+							px.clear();
+						}
+						{
+							std::lock_guard lk2(g_camLock);
+							if (g_galImgPath == path) {
+								g_galImg = std::move(px);
+								g_galImgW = w;
+								g_galImgH = h;
+							}
+							g_galLoading = false;
+						}
+						++g_camSeq;  // redraw (also starts the next load if the selection moved meanwhile)
+					}).detach();
+				}
+			}
+		}
+		const int ty = vy + vh + int(H * 0.02f);
+		char      info[96];
+		const auto cap = Gallery::Caption(path);
+		std::snprintf(info, sizeof(info), "%d / %d   %s", idx + 1, n, cap.c_str());
+		TextCentered(c, c.w / 2, ty, info, f, { 230, 235, 245 });
+		if (s.galConfirm) {
+			TextCentered(c, c.w / 2, ty + int(f * 1.6f), "再按回车删除（移到回收站）", f, { 255, 120, 120 });
+		}
+		DrawHint(c, "←→ 翻看   回车 删除");
+	}
+
 	void DrawQuests(Canvas& c, const State& s)
 	{
 		const float H = float(c.h), W = float(c.w);
@@ -575,6 +657,7 @@ namespace
 		switch (s.page) {
 		case kSettingsPage: DrawSettings(c, s); break;
 		case kCameraPage: DrawCamera(c, s); break;
+		case kGalleryPage: DrawGallery(c, s); break;
 		case kQuestsPage: DrawQuests(c, s); break;
 		default: DrawPlaceholder(c, s); break;
 		}
@@ -633,6 +716,11 @@ namespace Ui
 				if (st.page == kQuestsPage) {
 					g_questsLoaded = false;
 				}
+				if (st.page == kGalleryPage) {
+					g_galFiles = Gallery::List();
+					st.galIndex = 0;
+					st.galConfirm = false;
+				}
 				break;
 			default: return Action::kNone;
 			}
@@ -684,6 +772,40 @@ namespace Ui
 				return Action::kNone;
 			}
 			break;
+		case kGalleryPage: {
+			const int n = int(g_galFiles.size());
+			const bool confirm = st.galConfirm;
+			st.galConfirm = false;  // any other key cancels a pending delete
+			switch (a_key) {
+			case Key::kLeft:
+			case Key::kUp:
+				if (n) st.galIndex = (st.galIndex + n - 1) % n;
+				break;
+			case Key::kRight:
+			case Key::kDown:
+				if (n) st.galIndex = (st.galIndex + 1) % n;
+				break;
+			case Key::kEnter:
+				if (!n) {
+					return Action::kNone;
+				}
+				if (!confirm) {
+					st.galConfirm = true;
+				} else {
+					const auto path = g_galFiles[std::clamp(st.galIndex, 0, n - 1)];
+					const bool ok = Gallery::Recycle(path);
+					if (g_log) {
+						g_log(ok ? "gallery: photo moved to the Recycle Bin" : "gallery: delete FAILED");
+					}
+					g_galFiles = Gallery::List();
+					st.galIndex = std::clamp(st.galIndex, 0, std::max(0, int(g_galFiles.size()) - 1));
+				}
+				break;
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		}
 		default:
 			if (a_key != Key::kBack) {
 				return Action::kNone;
@@ -818,7 +940,8 @@ namespace Ui
 		const int   ch = std::max(16, int(std::lround(cw * s.aspect)));
 		const int   minute = int(s.hour * 60.0f);
 		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
-			g_version != g_drawnVersion || (s.page == kCameraPage && g_camSeq.load() != g_drawnCamSeq)) {
+			g_version != g_drawnVersion ||
+			((s.page == kCameraPage || s.page == kGalleryPage) && g_camSeq.load() != g_drawnCamSeq)) {
 			g_drawnCamSeq = g_camSeq.load();
 			g_canvas.Resize(cw, ch);
 			FillBackground(g_canvas);

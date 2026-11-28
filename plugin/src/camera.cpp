@@ -8,6 +8,7 @@
 // This file does not use CommonLibSF so that <windows.h>, <d3d12.h> and <dxgi1_4.h> can be included normally.
 
 #include "camera.h"
+#include "gallery.h"
 #include "screen.h"
 #include "ui.h"
 
@@ -259,17 +260,7 @@ namespace
 	// ---- photos ----
 	std::wstring PhotoDir()
 	{
-		PWSTR docs = nullptr;
-		if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs))) {
-			return {};
-		}
-		std::wstring dir = docs;
-		CoTaskMemFree(docs);
-		for (const wchar_t* part : { L"\\My Games", L"\\Starfield", L"\\PhoneCamera" }) {
-			dir += part;
-			CreateDirectoryW(dir.c_str(), nullptr);
-		}
-		return dir;
+		return Gallery::Dir();
 	}
 
 	void WriteToFile(void* a_ctx, void* a_data, int a_size)
