@@ -9,6 +9,8 @@
 //   Game.GetPlayerHomeSpaceShip   -> FUN_141A6BD50 ID 102957 (player, ref** out): out holds a reference,
 //                                    released with FUN_140384600 ID 38742
 //   TESObjectREFR::GetSpaceship   ID 119881  ref* (ref, true): the ship the ref is in (no reference added)
+//   SpaceshipReference.GetGravJumpRange ID 115013  float (vm, stack, ref**): computed from the ship parts (the
+//                                    SpaceshipGravJumpMaxDistance AV stays 0), in light years
 //   XP needed for a level         FUN_140D83030 ID 69497  float (level)   (Game.GetXPForLevel)
 //   GetFullName                   ID 47496   const char* (form)            ("" when the form has no name)
 
@@ -31,6 +33,7 @@ namespace
 	constexpr REL::ID kReleaseRef{ 38742 };
 	constexpr REL::ID kGetSpaceship{ 119881 };
 	constexpr REL::ID kXPForLevel{ 69497 };
+	constexpr REL::ID kGravJumpRange{ 115013 };
 	constexpr REL::ID kGetFullName{ 47496 };
 
 	// Starfield.esm AVIF form IDs
@@ -41,7 +44,6 @@ namespace
 	constexpr std::uint32_t kAvShieldHealth = 0x0024A05F;
 	constexpr std::uint32_t kAvShieldMaxHealth = 0x0005BFA8;
 	constexpr std::uint32_t kAvGravJumpFuel = 0x0000854F;
-	constexpr std::uint32_t kAvGravJumpMaxDistance = 0x00008551;
 	constexpr std::uint32_t kAvMaxPower = 0x00001018;
 	constexpr std::uint32_t kAvCrew = 0x00040CE0;
 	constexpr std::uint32_t kAvPassengerSlots = 0x0001E7DE;
@@ -56,6 +58,16 @@ namespace
 		}
 		using fn_t = float (*)(void*, std::uint32_t, void*, RE::TESForm*);
 		return reinterpret_cast<fn_t>((a_base ? kGetBaseValue : kGetValue).address())(nullptr, 0, a_ref, av);
+	}
+
+	// the native takes the ship as a ref** (SpaceshipReference self argument)
+	float JumpRange(void* a_ship)
+	{
+		if (!a_ship) {
+			return NAN;
+		}
+		using fn_t = float (*)(void*, std::uint32_t, void**);
+		return reinterpret_cast<fn_t>(kGravJumpRange.address())(nullptr, 0, &a_ship);
 	}
 
 	std::string Name(const void* a_form)
@@ -218,7 +230,7 @@ namespace Stats
 		rows.push_back(Gauge("护盾", Value(s, kAvShieldHealth), shieldMax));
 		rows.push_back(Gauge("跃迁燃料", Value(s, kAvGravJumpFuel), Value(s, kAvGravJumpFuel, true)));
 		rows.push_back(Header("性能"));
-		rows.push_back({ "跃迁距离", Num(Value(s, kAvGravJumpMaxDistance)) + " 光年" });
+		rows.push_back({ "跃迁距离", Num(JumpRange(s)) + " 光年" });
 		rows.push_back({ "货舱容量", Num(Value(s, kAvCarryWeight)) + " kg" });
 		rows.push_back({ "反应堆", Num(Value(s, kAvMaxPower)) });
 		rows.push_back({ "船员", Num(Value(s, kAvCrew)) });
@@ -230,7 +242,7 @@ namespace Stats
 			REX::INFO("stats: ship {:08X} '{}' hull {}/{} shield {}/{} fuel {}/{} jump {} cargo {} power {} crew {}",
 				reinterpret_cast<RE::TESForm*>(s)->GetFormID(), name, Value(s, kAvHealth), Value(s, kAvHealth, true),
 				Value(s, kAvShieldHealth), shieldMax, Value(s, kAvGravJumpFuel), Value(s, kAvGravJumpFuel, true),
-				Value(s, kAvGravJumpMaxDistance), Value(s, kAvCarryWeight), Value(s, kAvMaxPower), Value(s, kAvCrew));
+				JumpRange(s), Value(s, kAvCarryWeight), Value(s, kAvMaxPower), Value(s, kAvCrew));
 		}
 		return rows;
 	}

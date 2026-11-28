@@ -80,6 +80,7 @@ their VM / stack-ID arguments, so `stats.cpp` calls them directly with `nullptr,
 | Game.GetPlayerHomeSpaceShip | 102957 | FUN_141A6BD50 (player, ref** out); out holds a reference, release with ID 38742 |
 | TESObjectREFR::GetSpaceship | 119881 | ref* (ref, true): ship the ref is aboard, no reference added |
 | Game.GetXPForLevel | 69497 | float (level) |
+| SpaceshipReference.GetGravJumpRange | 115013 | float (vm, stack, ref**): light years (the SpaceshipGravJumpMaxDistance AV stays 0) |
 | Debug.Notification | 117311 | void (vm, stack, unused, BSFixedString*) (not used yet) |
 
 AVIF IDs: Health 2D4, Oxygen 2D5, CarryWeight 2DC, Experience 2C9, ShieldHealth 24A05F, ShieldMaxHealth 5BFA8,
