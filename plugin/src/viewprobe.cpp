@@ -33,12 +33,6 @@ namespace
 		}
 	}
 
-	bool Call(REL::ID a_id, std::uintptr_t a_a, std::uintptr_t a_b = 0, std::uintptr_t a_c = 0, std::uintptr_t a_d = 0,
-		std::uintptr_t* a_ret = nullptr)
-	{
-		return CallRaw(a_id.address(), a_a, a_b, a_c, a_d, a_ret);
-	}
-
 	template <class T>
 	bool Rd(std::uintptr_t a_addr, T& a_out)
 	{
