@@ -965,38 +965,64 @@ namespace
 		if (!SafeCopy(reinterpret_cast<const void*>(parents), par, std::size_t(count) * 2)) {
 			return;
 		}
-		static bool inSub[1024];
-		const int   clav = g_arr.index[0];
+		// Bones below the clavicle, by depth. The arrays are NOT ordered parents-first (the engine has its own update
+		// order table at block +0x38): one pass in index order reached only 3 bones and left the forearm, wrist and
+		// hand out. Walk each bone's parent chain instead and recompute depth by depth, parents first.
+		static int depth[1024];
+		const int  clav = g_arr.index[0];
 		const float w = g_armWeight.load();
-		int         n = 0;
+		int        maxDepth = 0;
 		for (int i = 0; i < count; ++i) {
-			inSub[i] = i == clav || (par[i] < count && par[i] < i && inSub[par[i]]);
-			if (!inSub[i] || i == clav && par[i] >= count) {
-				continue;
-			}
-			++n;
-			auto* L = reinterpret_cast<RE::NiTransform*>(locals + std::uintptr_t(i) * 0x40);
-			auto* M = reinterpret_cast<RE::NiTransform*>(model + std::uintptr_t(i) * 0x40);
-			const auto* P = reinterpret_cast<const RE::NiTransform*>(model + std::uintptr_t(par[i]) * 0x40);
-			RE::NiTransform local = *L;
-			for (int b = 0; b < kBones; ++b) {
-				if (g_arr.index[b] != i) continue;
-				// the local already carries our offset when nothing rewrote it since ApplyArrayOffsets
-				const bool ours = g_arr.haveWritten[b] && std::memcmp(L, g_arr.written[b], sizeof(g_arr.written[b])) == 0;
-				if (!ours) {
-					Xf off;
-					off.rot = g_boneRot[b];
-					const Mat d = w >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, w).rot;
-					SetMat(local.rotate, Mul(MatOf(local), d));
+			depth[i] = -1;
+			int d = 0;
+			for (int j = i; j < count && d < 64; j = par[j], ++d) {
+				if (j == clav) {
+					depth[i] = d;
+					maxDepth = std::max(maxDepth, d);
+					break;
 				}
 			}
-			ComposeWorld(*P, local, 1, *M);
+		}
+		if (clav < 0 || clav >= count || par[clav] >= count) {
+			return;
+		}
+		int n = 0;
+		for (int dd = 0; dd <= maxDepth; ++dd) {
+			for (int i = 0; i < count; ++i) {
+				if (depth[i] != dd) {
+					continue;
+				}
+				++n;
+				auto*       L = reinterpret_cast<RE::NiTransform*>(locals + std::uintptr_t(i) * 0x40);
+				auto*       M = reinterpret_cast<RE::NiTransform*>(model + std::uintptr_t(i) * 0x40);
+				const auto* P = reinterpret_cast<const RE::NiTransform*>(model + std::uintptr_t(par[i]) * 0x40);
+				RE::NiTransform local = *L;
+				for (int b = 0; b < kBones; ++b) {
+					if (g_arr.index[b] != i) continue;
+					// the local already carries our offset when nothing rewrote it since ApplyArrayOffsets
+					const bool ours = g_arr.haveWritten[b] && std::memcmp(L, g_arr.written[b], sizeof(g_arr.written[b])) == 0;
+					if (!ours) {
+						Xf off;
+						off.rot = g_boneRot[b];
+						const Mat d = w >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, w).rot;
+						SetMat(local.rotate, Mul(MatOf(local), d));
+					}
+				}
+				ComposeWorld(*P, local, 1, *M);
+			}
+		}
+		bool reached = true;  // all four arm bones must be in the subtree
+		for (int b = 0; b < kBones; ++b) {
+			reached = reached && g_arr.index[b] >= 0 && g_arr.index[b] < count && depth[g_arr.index[b]] >= 0;
 		}
 		static bool logged = false;
 		if (!logged) {
 			logged = true;
-			REX::INFO("arm: model array {:X}, parents {:X}: {} bones recomputed below the clavicle (index {}, parent {})", model, parents, n,
-				clav, par[clav]);
+			REX::INFO("arm: model array {:X}, parents {:X}: {} bones in {} levels below the clavicle (index {}, parent {}), arm bones reached: {}",
+				model, parents, n, maxDepth + 1, clav, par[clav], reached);
+			if (n < 10 || !reached) {
+				REX::WARN("arm: the clavicle's subtree looks wrong ({} bones): the arm pose will not show in this skeleton state", n);
+			}
 		}
 	}
 
