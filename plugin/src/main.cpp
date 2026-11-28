@@ -227,6 +227,10 @@ namespace
 	constexpr auto                        kActionGap = std::chrono::milliseconds(2500);
 	std::chrono::steady_clock::time_point g_lastAction{};
 
+	// photo in progress: the 1st-person body is hidden until the frame is copied (or this deadline)
+	bool                                  g_photoHiding = false;
+	std::chrono::steady_clock::time_point g_photoUnhideBy{};
+
 	void Perform(const Binding& a_b);
 
 	void QueuePreloadOpen()
@@ -423,7 +427,17 @@ namespace
 					break;
 				}
 				case Ui::Action::kTakePhoto:
-					Camera::RequestPhoto();
+					// hide the hand + phone, wait a few frames so temporal AA drops them, copy, show them again
+					if (!g_photoHiding && Tuner::SetFirstPersonHidden(true)) {
+						if (Camera::RequestPhoto(6, 120)) {
+							g_photoHiding = true;
+							g_photoUnhideBy = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+						} else {
+							Tuner::SetFirstPersonHidden(false);
+						}
+					} else if (!g_photoHiding) {
+						Camera::RequestPhoto();
+					}
 					break;
 				case Ui::Action::kOpenPhotoMode:
 					// put the phone away, then open photo mode once the hand is down
@@ -455,6 +469,10 @@ namespace
 			}
 		}
 
+		if (g_photoHiding && (Camera::PhotoCopied() || !g_open || std::chrono::steady_clock::now() >= g_photoUnhideBy)) {
+			Tuner::SetFirstPersonHidden(false);
+			g_photoHiding = false;
+		}
 		Tuner::Tick(g_open && g_devKeys);
 
 		// Quests app: refresh every 2 s while its page is open

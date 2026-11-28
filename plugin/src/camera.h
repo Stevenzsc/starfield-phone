@@ -13,5 +13,7 @@ namespace Camera
 
 	bool Install(LogFn a_log);   // hooks IDXGISwapChain::Present / Present1 (vtable of a dummy swap chain)
 	void SetActive(bool a_open);  // the phone is out (capture only while the Camera page is shown, too)
-	void RequestPhoto();
+	// Save a photo once a_waitPresents more frames were presented and a_waitMs passed (false if one is in flight).
+	bool RequestPhoto(int a_waitPresents = 0, int a_waitMs = 0);
+	bool PhotoCopied();  // the requested photo's frame has been copied (the hidden hand may be shown again)
 }

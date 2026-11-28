@@ -8,4 +8,7 @@ namespace Tuner
 	void Install();            // at plugin load (needs the SFSE trampoline)
 	void Load();               // read the saved offset (PhoneTest_offset.txt)
 	void Tick(bool a_isOpen);  // call often from the game's task queue
+
+	// Hide / show the 1st-person body and the phone (for photos). Returns false if the branch was not found.
+	bool SetFirstPersonHidden(bool a_hide);
 }

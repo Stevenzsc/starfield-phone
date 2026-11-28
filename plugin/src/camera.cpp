@@ -75,6 +75,10 @@ namespace
 	std::atomic_bool g_open{ false };
 	std::atomic_bool g_photoRequested{ false };
 	std::atomic_bool g_photoSaving{ false };
+	std::atomic_bool g_photoCopied{ false };  // the photo's back-buffer copy is submitted
+	std::atomic_uint64_t g_presents{ 0 };     // presents seen while the phone is out
+	std::atomic_uint64_t g_photoAfterPresent{ 0 };
+	std::chrono::steady_clock::time_point g_photoAfterTime{};  // written before g_photoRequested is set
 
 	// ---- pixel formats ----
 	enum class Kind
@@ -357,9 +361,12 @@ namespace
 		if (!g_open.load()) {
 			return;
 		}
+		const auto presents = ++g_presents;
 		int vw = 0, vh = 0;
 		const bool wantPreview = Ui::CameraTarget(vw, vh);
-		bool       photo = g_photoRequested.load();
+		// a photo waits until the hidden hand / phone has left the frame (and temporal AA has let go of it)
+		bool photo = g_photoRequested.load() && presents >= g_photoAfterPresent.load() &&
+		             std::chrono::steady_clock::now() >= g_photoAfterTime;
 		if (!wantPreview && !photo) {
 			return;
 		}
@@ -512,6 +519,7 @@ namespace
 		if (slot->photo) {
 			g_photoSaving = true;
 			g_photoRequested = false;
+			g_photoCopied = true;
 		}
 
 		slot->alloc->Reset();
@@ -636,10 +644,20 @@ namespace Camera
 		g_open = a_open;
 	}
 
-	void RequestPhoto()
+	bool RequestPhoto(int a_waitPresents, int a_waitMs)
 	{
-		if (!g_photoSaving.load()) {
-			g_photoRequested = true;
+		if (g_photoSaving.load() || g_photoRequested.load()) {
+			return false;
 		}
+		g_photoAfterPresent = g_presents.load() + std::uint64_t(std::max(0, a_waitPresents));
+		g_photoAfterTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(0, a_waitMs));
+		g_photoCopied = false;
+		g_photoRequested = true;
+		return true;
+	}
+
+	bool PhotoCopied()
+	{
+		return g_photoCopied.load();
 	}
 }

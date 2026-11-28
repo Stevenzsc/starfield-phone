@@ -10,6 +10,7 @@
 #include "pch.h"
 #include "tuner.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <string>
@@ -414,8 +415,90 @@ namespace
 	constexpr std::array<int, 16> kKeys{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x6E, 0x6F, 0 };
 }
 
+namespace
+{
+	// ---- hide the 1st-person body + phone for a photo ----
+	// NiAVObject flags at +0x118 (CommonLibSF; parent/local/world offsets around it are verified); bit 0 is the
+	// "culled / hidden" bit the renderer tests (`test byte [reg+118h], 1` appears 52 times in Starfield.exe).
+	constexpr std::ptrdiff_t kFlagsOffset = 0x118;
+
+	RE::NiPointer<RE::NiAVObject> g_hiddenNode;
+	bool                          g_hiddenWasSet = false;
+	bool                          g_loggedHideChain = false;
+
+	std::uint64_t& FlagsOf(RE::NiAVObject* a_obj)
+	{
+		return *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uintptr_t>(a_obj) + kFlagsOffset);
+	}
+
+	// Highest ancestor of the phone that does not also hold the player's 3rd-person 3D: the 1st-person branch.
+	RE::NiAVObject* FirstPersonBranch()
+	{
+		auto* p3d = Player3D();
+		auto* top = TopOf(p3d);
+		if (!top) {
+			return nullptr;
+		}
+		RE::NiAVObject* phone = NewestOnBone();
+		if (!phone) {
+			const RE::BSFixedString name{ kRootName };
+			phone = FindByName(top, name);
+		}
+		if (!phone) {
+			return nullptr;
+		}
+		std::vector<RE::NiAVObject*> shared;  // p3d and its ancestors
+		for (auto* a = p3d; a && shared.size() < 64; a = a->parent) {
+			shared.push_back(a);
+		}
+		auto isShared = [&](RE::NiAVObject* a_obj) { return std::find(shared.begin(), shared.end(), a_obj) != shared.end(); };
+
+		std::string     chain;
+		RE::NiAVObject* node = phone;
+		for (int depth = 0; node->parent && !isShared(node->parent) && depth < 64; ++depth) {
+			chain += NameOf(node);
+			chain += " < ";
+			node = node->parent;
+		}
+		if (!g_loggedHideChain) {
+			g_loggedHideChain = true;
+			REX::INFO("photo: 1st-person chain {}[{}] under '{}' (top '{}')", chain, NameOf(node),
+				node->parent ? NameOf(node->parent) : "none", NameOf(top));
+		}
+		if (node == top || !node->parent) {
+			return nullptr;  // would hide the whole scene
+		}
+		return node;
+	}
+}
+
 namespace Tuner
 {
+	bool SetFirstPersonHidden(bool a_hide)
+	{
+		if (!a_hide) {
+			if (g_hiddenNode) {
+				if (!g_hiddenWasSet) {
+					FlagsOf(g_hiddenNode.get()) &= ~std::uint64_t(1);
+				}
+				g_hiddenNode.reset();
+			}
+			return true;
+		}
+		if (g_hiddenNode) {
+			return true;
+		}
+		auto* node = FirstPersonBranch();
+		if (!node) {
+			REX::WARN("photo: 1st-person branch not found; the hand stays in the photo");
+			return false;
+		}
+		g_hiddenNode = RE::NiPointer<RE::NiAVObject>(node);
+		g_hiddenWasSet = (FlagsOf(node) & 1) != 0;
+		FlagsOf(node) |= 1;
+		return true;
+	}
+
 	void Install()
 	{
 		const auto site = kAttachCaller.address() + kAttachCallOffset;
