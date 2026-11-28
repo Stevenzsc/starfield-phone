@@ -11,6 +11,7 @@
 #include "lang.h"
 #include "tuner.h"
 #include "ui.h"
+#include "bonetrace.h"
 
 #include <algorithm>
 #include <array>
@@ -761,6 +762,22 @@ namespace
 			g_hookBones[b] = g_arm.bones[b].node;
 		}
 		g_armWeight = a_weight;
+
+		// once per session: find out which game code writes the upper arm (hardware watchpoints, 5 s)
+		auto* upper = g_arm.bones[1].node;
+		BoneTrace::Arm(&upper->local, &upper->world, [](const char* a_msg) { REX::INFO("{}", a_msg); });
+		BoneTrace::Poll();
+		// Fallback while the hook gets no calls: write from the task too (worked when the task ran between the
+		// animation and the scene update). Not during the trace, so it does not catch our own writes.
+		if (BoneTrace::Done()) {
+			for (int b = 0; b < kBones; ++b) {
+				ApplyBoneOffset(b);
+			}
+			auto* top = g_arm.bones[0].node;
+			// convention 1 (world = localRot * parentRot): measured with zero error while the transforms were settled;
+			// the detection in FindArm is unreliable when it runs mid-update
+			UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
+		}
 		const auto now = std::chrono::steady_clock::now();
 		std::lock_guard lk(g_armLock);
 		if (now >= g_arm.nextLog) {

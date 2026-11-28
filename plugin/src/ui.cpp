@@ -854,9 +854,11 @@ namespace
 			std::snprintf(n, sizeof(n), "%d", std::min(g_unread, 99));
 			Text(c, mx + mw + int(f * 0.25f), y + int(f * 0.06f), n, f * 0.85f, kGold);
 		}
+		int afterIcons = afterClock;
 		if (const auto ms = Music::Get(); ms.playing && ms.index >= 0) {  // music playing: a note after the clock
 			if (HasIcon(0xE8D6)) Icon(c, afterClock + int(f * 0.4f), y + int(f * 0.55f), 0xE8D6, f * 0.8f, kText);
 			else Text(c, afterClock, y, "♪", f, kText);
+			afterIcons = afterClock + int(f * 1.1f);
 		}
 
 		const int bh = int(f * 0.62f), bw = int(bh * 2.1f);
@@ -870,7 +872,43 @@ namespace
 			Rect(c, sx + i * int(f * 0.3f), by + bh - h, std::max(2, int(f * 0.17f)), h, kText);
 		}
 		const char* net = Tr("星联");
-		Text(c, sx - TextWidth(net, f * 0.85f) - int(f * 0.45f), y + int(f * 0.06f), net, f * 0.85f, kDim);
+		const int   netX = sx - TextWidth(net, f * 0.85f) - int(f * 0.45f);
+		Text(c, netX, y + int(f * 0.06f), net, f * 0.85f, kDim);
+
+		// Camera page: its button prompts sit in the status bar, between the clock and the carrier (the bottom of the
+		// screen is behind the hand in the photo pose); right-aligned, shrunk to fit
+		if (s.page == kCameraPage) {
+			struct KeyLabel
+			{
+				const char* key;
+				const char* label;
+			};
+			const KeyLabel items[] = { { "Enter", Tr("拍照") }, { Tr("退格"), Tr("返回") } };
+			const int      left = afterIcons + int(f * 0.4f), right = netX - int(f * 0.8f);
+			float          pf = f * 0.8f;
+			auto           width = [&](float a_f) {
+                int w = 0;
+                for (const auto& it : items) {
+                    w += TextWidth(it.key, a_f * 0.85f) + int(a_f * 0.8f) + int(a_f * 0.35f) + TextWidth(it.label, a_f) + int(a_f * 0.9f);
+                }
+                return w - int(a_f * 0.9f);
+			};
+			while (pf > 8.0f && width(pf) > right - left) pf *= 0.94f;
+			if (right - left > 20) {
+				int       x = right;
+				const int boxH = int(pf * 1.4f);
+				const int by = y + int(f * 0.55f) - boxH / 2;
+				for (int i = int(std::size(items)) - 1; i >= 0; --i) {
+					x -= TextWidth(items[i].label, pf);
+					Text(c, x, by + int(pf * 0.18f), items[i].label, pf, kText);
+					const int kw = TextWidth(items[i].key, pf * 0.85f) + int(pf * 0.8f);
+					x -= kw + int(pf * 0.35f);
+					Frame(c, x, by, kw, boxH, 2, kText, 0.9f);
+					Text(c, x + int(pf * 0.4f), by + int(pf * 0.26f), items[i].key, pf * 0.85f, kText);
+					x -= int(pf * 0.9f);
+				}
+			}
+		}
 		const int line = y + int(f * 1.45f);
 		Rect(c, pad, line, c.w - 2 * pad, 1, kLine);
 		return line + 1;
@@ -1063,11 +1101,10 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const float f = std::max(12.0f, H * 0.034f);
-		// prompts on top: the bottom of the screen sits behind the hand in the photo pose
-		const int   barEnd = Prompts(c, { { "Enter", Tr("拍照") }, { Tr("退格"), Tr("返回") } }, a_y);
+		// the button prompts are in the status bar (StatusBar); the bottom of the screen is behind the hand
 		const int   bottom = c.h - int(H * 0.02f);
 		const int   d = int(std::min(W * 0.16f, H * 0.1f));  // shutter size
-		const int   vx = int(W * 0.03f), vy = barEnd + int(H * 0.015f);
+		const int   vx = int(W * 0.03f), vy = a_y + int(H * 0.015f);
 		const int   vw = c.w - 2 * vx, vh = bottom - vy - d - int(H * 0.04f);
 		g_camW = vw;
 		g_camH = vh;
