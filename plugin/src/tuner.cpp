@@ -830,7 +830,7 @@ namespace Tuner
 		// Camera page: '.' cycles the target (phone, clavicle, upper arm, forearm, wrist), 0 resets it, Ctrl = coarse
 		// steps, 5 saves the phone pose and the arm pose. Elsewhere: the old tuner ('.' toggles fine / coarse).
 		if (a_keys && active) {
-			const bool coarse = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+			const bool coarse = (GetAsyncKeyState(0x11 /* VK_CONTROL */) & 0x8000) != 0;
 			bool       any = false;
 			for (std::size_t i = 0; i + 1 < kKeys.size(); ++i) {
 				const int  vk = kKeys[i];
