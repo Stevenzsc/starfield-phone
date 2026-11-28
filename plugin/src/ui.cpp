@@ -420,7 +420,7 @@ namespace
 		bool sound = true;
 		bool vibration = true;
 		int  musicVolume = 60;
-		int  language = 0;  // Lang mode: 0 auto, 1 中文, 2 English
+		int  language = 2;  // Lang mode: 0 auto, 1 中文, 2 English (default)
 		// quests
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
 		int detailScroll = 0; // first objective row on the quest details page

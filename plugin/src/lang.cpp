@@ -9,7 +9,7 @@
 
 namespace
 {
-	std::atomic_int  g_mode{ 0 };
+	std::atomic_int  g_mode{ 2 };  // English unless the ini says otherwise
 	std::atomic_bool g_gameEnglish{ false };
 
 	const std::unordered_map<std::string_view, const char*>& Table()
@@ -208,7 +208,7 @@ namespace
 
 namespace Lang
 {
-	void SetMode(int a_mode) { g_mode = (a_mode < 0 || a_mode > 2) ? 0 : a_mode; }
+	void SetMode(int a_mode) { g_mode = (a_mode < 0 || a_mode > 2) ? 2 : a_mode; }
 	int  Mode() { return g_mode.load(); }
 
 	const char* ModeName(int a_mode)

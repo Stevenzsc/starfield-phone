@@ -7,7 +7,7 @@
 // This file does not use CommonLibSF.
 namespace Lang
 {
-	// 0 auto (follow the game's text language), 1 Chinese, 2 English
+	// 0 auto (follow the game's text language), 1 Chinese, 2 English (default)
 	void SetMode(int a_mode);
 	int  Mode();
 	const char* ModeName(int a_mode);  // "自动" / "中文" / "English" (already in the current language)

@@ -64,7 +64,7 @@ namespace Ui
 		bool sound = true;       // button sounds
 		bool vibration = true;   // controller rumble
 		int  musicVolume = 60;   // Music app, percent
-		int  language = 0;       // 0 auto (game text language), 1 中文, 2 English
+		int  language = 2;       // 0 auto (game text language), 1 中文, 2 English (default)
 	};
 	Settings    GetSettings();
 	void        SetSettings(const Settings& a_settings);
