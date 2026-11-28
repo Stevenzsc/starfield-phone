@@ -11,7 +11,6 @@
 #include "lang.h"
 #include "tuner.h"
 #include "ui.h"
-#include "bonetrace.h"
 
 #include <algorithm>
 #include <array>
@@ -654,22 +653,10 @@ namespace
 		return true;
 	}
 
-	// ---- applying the offsets: hook UpdateWorldData (vtable +0x278) of the bones' class ----
-	// Writing the bones from the SFSE task only worked when the task happened to run between the animation and the
-	// scene update (seen working in one session, not in the next). NiNode::Update (+0x248) calls UpdateWorldData
-	// (+0x278) on a node and then updates its children, and every update path ends in +0x278, after the animation
-	// has written the bones' locals: put our offset into the local right there and let the engine do the rest.
-	constexpr std::size_t kUpdateWorldDataSlot = 0x278 / 8;
-	using UpdateWorldData_t = void (*)(RE::NiAVObject*, void*);
-	struct VtblHook
-	{
-		void**            vtbl = nullptr;
-		UpdateWorldData_t orig = nullptr;
-	};
-	VtblHook                      g_vtblHooks[kBones];
-	std::atomic<RE::NiAVObject*>  g_hookBones[kBones]{};
-	std::atomic<float>            g_armWeight{ 0.0F };
-	std::mutex                    g_armLock;  // g_arm.bones[] state touched from the update threads
+	// ---- applying the offsets (see Update3D_Hook below for where) ----
+	std::atomic<RE::NiAVObject*> g_hookBones[kBones]{};
+	std::atomic<float>           g_armWeight{ 0.0F };
+	std::mutex                   g_armLock;  // g_arm.bones[] state touched from the update job threads
 
 	void ApplyBoneOffset(int a_bone)
 	{
@@ -702,53 +689,32 @@ namespace
 		bone.haveWritten = true;
 	}
 
-	void UpdateWorldData_Hook(RE::NiAVObject* a_self, void* a_data)
-	{
-		UpdateWorldData_t orig = nullptr;
-		void** const      vtbl = *reinterpret_cast<void***>(a_self);
-		for (const auto& h : g_vtblHooks) {
-			if (h.vtbl == vtbl) {
-				orig = h.orig;
-				break;
-			}
-		}
-		for (int b = 0; b < kBones; ++b) {
-			if (g_hookBones[b].load() == a_self) {
-				ApplyBoneOffset(b);
-				break;
-			}
-		}
-		if (orig) {
-			orig(a_self, a_data);
-		}
-	}
+	// ---- the reliable point: the player's 1st-person 3D update ----
+	// A hardware-watchpoint trace (bonetrace.cpp) showed the animation job writing the bones' locals and the
+	// player's 3D update FUN_141A3D8C0 (ID 102725) computing their world transforms through
+	// FUN_141A1CB20(actor, dt, root, camera, firstPerson, ...) (ID 102618); both run on job threads, which is why
+	// writes from the SFSE task and the NiNode::UpdateWorldData hook only worked in some sessions. The call at
+	// +0x161 is the first-person one: put our offsets into the locals right before it.
+	constexpr REL::ID        kPlayerUpdate3D{ 102725 };
+	constexpr std::ptrdiff_t kFirstPersonUpdateCall = 0x161;
+	using Update3D_t = void (*)(void*, float, void*, void*, char, char, std::uint8_t);
+	Update3D_t           g_update3DOrig = nullptr;
+	std::atomic_uint32_t g_update3DCalls{ 0 };
 
-	void HookVtblOf(RE::NiAVObject* a_obj)
+	void Update3D_Hook(void* a_actor, float a_dt, void* a_root, void* a_camera, char a_first, char a_flag, std::uint8_t a_p7)
 	{
-		void** const vtbl = *reinterpret_cast<void***>(a_obj);
-		for (auto& h : g_vtblHooks) {
-			if (h.vtbl == vtbl) {
-				return;  // already hooked
-			}
-		}
-		for (auto& h : g_vtblHooks) {
-			if (!h.vtbl) {
-				std::uint32_t old = 0;
-				if (!REX::W32::VirtualProtect(&vtbl[kUpdateWorldDataSlot], sizeof(void*), REX::W32::PAGE_EXECUTE_READWRITE, &old)) {
-					REX::ERROR("arm: VirtualProtect failed");
-					return;
+		if (a_first) {
+			++g_update3DCalls;
+			for (int b = 0; b < kBones; ++b) {
+				if (g_hookBones[b].load()) {
+					ApplyBoneOffset(b);
 				}
-				h.orig = reinterpret_cast<UpdateWorldData_t>(vtbl[kUpdateWorldDataSlot]);
-				h.vtbl = vtbl;
-				vtbl[kUpdateWorldDataSlot] = reinterpret_cast<void*>(&UpdateWorldData_Hook);
-				REX::W32::VirtualProtect(&vtbl[kUpdateWorldDataSlot], sizeof(void*), old, &old);
-				REX::INFO("arm: hooked UpdateWorldData of vtable {:X} ({})", reinterpret_cast<std::uintptr_t>(vtbl), NameOf(a_obj));
-				return;
 			}
 		}
+		g_update3DOrig(a_actor, a_dt, a_root, a_camera, a_first, a_flag, a_p7);
 	}
 
-	// task side: find the bones, hook their class once, publish them and the blend weight
+	// task side: find the bones, publish them and the blend weight
 	void ArmTick(float a_weight)
 	{
 		{
@@ -758,31 +724,16 @@ namespace
 			}
 		}
 		for (int b = 0; b < kBones; ++b) {
-			HookVtblOf(g_arm.bones[b].node);
 			g_hookBones[b] = g_arm.bones[b].node;
 		}
 		g_armWeight = a_weight;
 
-		// once per session: find out which game code writes the upper arm (hardware watchpoints, 5 s)
-		auto* upper = g_arm.bones[1].node;
-		BoneTrace::Arm(&upper->local, &upper->world, [](const char* a_msg) { REX::INFO("{}", a_msg); });
-		BoneTrace::Poll();
-		// Fallback while the hook gets no calls: write from the task too (worked when the task ran between the
-		// animation and the scene update). Not during the trace, so it does not catch our own writes.
-		if (BoneTrace::Done()) {
-			for (int b = 0; b < kBones; ++b) {
-				ApplyBoneOffset(b);
-			}
-			auto* top = g_arm.bones[0].node;
-			// convention 1 (world = localRot * parentRot): measured with zero error while the transforms were settled;
-			// the detection in FindArm is unreliable when it runs mid-update
-			UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
-		}
 		const auto now = std::chrono::steady_clock::now();
 		std::lock_guard lk(g_armLock);
 		if (now >= g_arm.nextLog) {
 			g_arm.nextLog = now + std::chrono::seconds(5);
-			REX::INFO("arm: weight {:.2f}, upper arm UpdateWorldData calls {}, animation writes {}", a_weight, g_arm.ticks, g_arm.rewritten);
+			REX::INFO("arm: weight {:.2f}, 1st-person 3D updates {}, upper arm offset applied {} times, animation writes {}", a_weight,
+				g_update3DCalls.exchange(0), g_arm.ticks, g_arm.rewritten);
 			g_arm.rewritten = g_arm.ticks = 0;
 		}
 	}
@@ -866,6 +817,14 @@ namespace Tuner
 			return;
 		}
 		g_attachOrig = reinterpret_cast<Attach_t>(REL::GetTrampoline().write_call<5>(site, Attach_Hook));
+
+		const auto site3D = kPlayerUpdate3D.address() + kFirstPersonUpdateCall;
+		if (*reinterpret_cast<const std::uint8_t*>(site3D) == 0xE8) {
+			g_update3DOrig = reinterpret_cast<Update3D_t>(REL::GetTrampoline().write_call<5>(site3D, Update3D_Hook));
+			REX::INFO("arm: hooked the player's 1st-person 3D update at Starfield.exe+0x{:X}", kPlayerUpdate3D.offset() + kFirstPersonUpdateCall);
+		} else {
+			REX::ERROR("arm: expected a call at ID 102725 +0x{:X}; arm pose disabled", kFirstPersonUpdateCall);
+		}
 		REX::INFO("tuner: hooked AnimObject attach at Starfield.exe+0x{:X}", kAttachCaller.offset() + kAttachCallOffset);
 	}
 

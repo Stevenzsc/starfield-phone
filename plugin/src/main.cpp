@@ -816,7 +816,7 @@ namespace
 
 SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 {
-	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 64 });
+	SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 128 });
 	REX::INFO("PhoneTest loaded; PerformAction ptr at Starfield.exe+0x{:X}", kPerformActionPtr.offset());
 	Ui::Init([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Screen::Install(kScreenWidth, kScreenHeight, [](const char* a_msg) { REX::INFO("{}", a_msg); });
