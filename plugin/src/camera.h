@@ -15,5 +15,9 @@ namespace Camera
 	void SetActive(bool a_open);  // the phone is out (capture only while the Camera page is shown, too)
 	// Save a photo once a_waitPresents more frames were presented and a_waitMs passed (false if one is in flight).
 	bool RequestPhoto(int a_waitPresents = 0, int a_waitMs = 0);
-	bool PhotoCopied();  // the requested photo's frame has been copied (the hidden hand may be shown again)
+	bool PhotoCopied();  // the requested photo's frame has been copied
+
+	// part of the screen the viewfinder and photos take (fractions, x0 y0 x1 y1); the largest rectangle with the
+	// viewfinder's aspect inside it is used. Default: the whole screen.
+	void SetCropRegion(float a_x0, float a_y0, float a_x1, float a_y1);
 }

@@ -75,6 +75,7 @@ namespace
 	std::atomic_bool g_open{ false };
 	std::atomic_bool g_photoRequested{ false };
 	std::atomic_bool g_photoSaving{ false };
+	std::atomic<float> g_regionX0{ 0.0F }, g_regionY0{ 0.0F }, g_regionX1{ 1.0F }, g_regionY1{ 1.0F };
 	std::atomic_bool g_photoCopied{ false };  // the photo's back-buffer copy is submitted
 	std::atomic_uint64_t g_presents{ 0 };     // presents seen while the phone is out
 	std::atomic_uint64_t g_photoAfterPresent{ 0 };
@@ -504,15 +505,23 @@ namespace
 			return;
 		}
 
-		// centre crop with the viewfinder's aspect (height / width), as tall as the frame allows
+		// largest rectangle with the viewfinder's aspect (height / width) inside the crop region (whole texture for
+		// the second view), centred in it
 		const float aspect = (vw > 0 && vh > 0) ? float(vh) / float(vw) : 1.5f;
 		const auto  W = std::uint32_t(bd.Width), H = bd.Height;
-		std::uint32_t ch = H, cw = std::uint32_t(std::lround(float(H) / aspect));
-		if (cw > W) {
-			cw = W;
-			ch = std::min(H, std::uint32_t(std::lround(float(W) * aspect)));
+		float       fx0 = 0, fy0 = 0, fx1 = 1, fy1 = 1;
+		if (!vt) {
+			fx0 = std::clamp(g_regionX0.load(), 0.0F, 0.95F), fy0 = std::clamp(g_regionY0.load(), 0.0F, 0.95F);
+			fx1 = std::clamp(g_regionX1.load(), fx0 + 0.05F, 1.0F), fy1 = std::clamp(g_regionY1.load(), fy0 + 0.05F, 1.0F);
 		}
-		const std::uint32_t x0 = (W - cw) / 2, y0 = (H - ch) / 2;
+		const auto    rx = std::uint32_t(fx0 * W), ry = std::uint32_t(fy0 * H);
+		const auto    rw = std::max(16u, std::uint32_t((fx1 - fx0) * W)), rh = std::max(16u, std::uint32_t((fy1 - fy0) * H));
+		std::uint32_t ch = rh, cw = std::uint32_t(std::lround(float(rh) / aspect));
+		if (cw > rw) {
+			cw = rw;
+			ch = std::min(rh, std::uint32_t(std::lround(float(rw) * aspect)));
+		}
+		const std::uint32_t x0 = std::min(W - cw, rx + (rw - cw) / 2), y0 = std::min(H - ch, ry + (rh - ch) / 2);
 
 		D3D12_RESOURCE_DESC td = bd;
 		td.Width = cw;
@@ -682,5 +691,13 @@ namespace Camera
 	bool PhotoCopied()
 	{
 		return g_photoCopied.load();
+	}
+
+	void SetCropRegion(float a_x0, float a_y0, float a_x1, float a_y1)
+	{
+		g_regionX0 = a_x0;
+		g_regionY0 = a_y0;
+		g_regionX1 = a_x1;
+		g_regionY1 = a_y1;
 	}
 }

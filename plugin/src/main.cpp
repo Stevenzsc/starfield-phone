@@ -30,14 +30,17 @@
 #include "stats.h"
 #include "viewprobe.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -306,6 +309,42 @@ namespace
 		}
 	}
 
+	// PhoneTest.ini camera_crop=x0,y0,x1,y1 (fractions of the screen) and camera_hide_hud=0/1, re-read every second
+	void CameraPageTick(bool a_on)
+	{
+		static bool hudHidden = false;
+		static auto next = std::chrono::steady_clock::now();
+		static bool hideHud = true;
+		if (a_on && std::chrono::steady_clock::now() >= next) {
+			next = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+			float         r[4] = { 0.40F, 0.04F, 0.98F, 0.72F };
+			std::ifstream in(kIniPath);
+			std::string   line;
+			while (std::getline(in, line)) {
+				if (!line.empty() && line.back() == '\r') {
+					line.pop_back();
+				}
+				if (line.rfind("camera_crop=", 0) == 0) {
+					float v[4];
+					if (std::sscanf(line.c_str() + 12, "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) == 4) {
+						std::copy(std::begin(v), std::end(v), std::begin(r));
+					}
+				} else if (line.rfind("camera_hide_hud=", 0) == 0) {
+					hideHud = line.size() > 16 && line[16] != '0';
+				}
+			}
+			Camera::SetCropRegion(r[0], r[1], r[2], r[3]);
+		}
+		const bool wantHidden = a_on && hideHud;
+		if (wantHidden != hudHidden) {
+			if (auto* q = RE::UIMessageQueue::GetSingleton()) {
+				const auto res = q->AddMessage(RE::BSFixedString{ "HUDMenu" }, wantHidden ? RE::UI_MESSAGE_TYPE::kHide : RE::UI_MESSAGE_TYPE::kShow);
+				REX::INFO("camera: HUDMenu {} -> {}", wantHidden ? "hide" : "show", res);
+			}
+			hudHidden = wantHidden;
+		}
+	}
+
 	void OpenPhotoMode()
 	{
 		auto* q = RE::UIMessageQueue::GetSingleton();
@@ -460,12 +499,14 @@ namespace
 			}
 		}
 
-		// second view: our own camera + output rendered into a texture while the Camera page is shown
+		// Camera page: the phone takes its camera pose, the HUD is hidden and the viewfinder crops the main frame
+		// (the second render view, ViewProbe::Tick, is off: it drew characters and ships only partly)
 		{
-			int cw = 0, ch = 0;
-			ViewProbe::Tick(g_open && Ui::CameraTarget(cw, ch));
+			int        cw = 0, ch = 0;
+			const bool cameraPage = g_open && Ui::CameraTarget(cw, ch);
+			Tuner::Tick(g_open, g_devKeys, cameraPage);
+			CameraPageTick(cameraPage);
 		}
-		Tuner::Tick(g_open && g_devKeys);
 
 		// Quests app: refresh every 2 s while its page is open
 		static auto nextQuests = std::chrono::steady_clock::now();

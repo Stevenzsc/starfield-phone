@@ -28,6 +28,8 @@ namespace
 {
 	constexpr const char* kRootName = "PhoneAnimObjectRoot";  // tools/make_test_assets.py ROOT_NAME
 	constexpr const char* kSavePath = "Data\\SFSE\\Plugins\\PhoneTest_offset.txt";
+	// pose while the Camera page is shown: the phone moves out of the part of the screen the camera crops
+	constexpr const char* kCameraSavePath = "Data\\SFSE\\Plugins\\PhoneTest_camera_offset.txt";
 
 	using Vec = std::array<float, 3>;
 	using Mat = std::array<std::array<float, 3>, 3>;  // row-major, v_world = M * v_local
@@ -101,7 +103,16 @@ namespace
 		a_out.scale = a_orig.scale;
 	}
 
-	Xf                                  g_d;
+	Xf                                  g_d;    // normal pose offset (dev keys only)
+	Xf                                  g_cam;  // Camera page pose offset
+	bool                                g_camReady = false;
+	enum class Mode
+	{
+		kNone,    // NIF placement as baked
+		kNormal,  // g_d (dev keys)
+		kCamera,  // g_cam (Camera page)
+	};
+	Mode                                g_applied = Mode::kNone;
 	bool                                g_fine = true;
 	RE::NiPointer<RE::NiAVObject>       g_root;
 	std::vector<RE::NiAVObject*>        g_children;  // owned by g_root
@@ -109,18 +120,42 @@ namespace
 	std::chrono::steady_clock::time_point g_nextRepeat{};
 	std::array<bool, 16>                g_wasDown{};
 
-	void Save()
+	void Save(const Xf& a_d, const char* a_path)
 	{
-		std::ofstream out(kSavePath, std::ios::trunc);
+		std::ofstream out(a_path, std::ios::trunc);
 		out.imbue(std::locale::classic());
 		out << "rot";
-		for (auto& row : g_d.rot)
+		for (auto& row : a_d.rot)
 			for (float v : row)
 				out << ' ' << v;
-		out << "\ntrans " << g_d.trans[0] << ' ' << g_d.trans[1] << ' ' << g_d.trans[2] << '\n';
+		out << "\ntrans " << a_d.trans[0] << ' ' << a_d.trans[1] << ' ' << a_d.trans[2] << '\n';
 		REX::INFO("tuner: saved offset to {}: rot [{:.4f} {:.4f} {:.4f} / {:.4f} {:.4f} {:.4f} / {:.4f} {:.4f} {:.4f}] trans [{:.4f} {:.4f} {:.4f}]",
-			kSavePath, g_d.rot[0][0], g_d.rot[0][1], g_d.rot[0][2], g_d.rot[1][0], g_d.rot[1][1], g_d.rot[1][2],
-			g_d.rot[2][0], g_d.rot[2][1], g_d.rot[2][2], g_d.trans[0], g_d.trans[1], g_d.trans[2]);
+			a_path, a_d.rot[0][0], a_d.rot[0][1], a_d.rot[0][2], a_d.rot[1][0], a_d.rot[1][1], a_d.rot[1][2],
+			a_d.rot[2][0], a_d.rot[2][1], a_d.rot[2][2], a_d.trans[0], a_d.trans[1], a_d.trans[2]);
+	}
+
+	bool LoadXf(const char* a_path, Xf& a_out)
+	{
+		std::ifstream in(a_path);
+		if (!in) {
+			return false;
+		}
+		in.imbue(std::locale::classic());
+		std::string tag;
+		Xf          d;
+		if ((in >> tag) && tag == "rot") {
+			for (auto& row : d.rot)
+				for (float& v : row) in >> v;
+		}
+		if ((in >> tag) && tag == "trans") {
+			in >> d.trans[0] >> d.trans[1] >> d.trans[2];
+		}
+		if (!in) {
+			REX::WARN("tuner: could not parse {}", a_path);
+			return false;
+		}
+		a_out = d;
+		return true;
 	}
 
 	void Release()
@@ -362,7 +397,7 @@ namespace
 		return true;
 	}
 
-	void Step(int a_key)
+	void Step(int a_key, Xf& g_d)  // the parameter shadows the global: tunes whichever pose is active
 	{
 		if (!g_root) {
 			REX::INFO("tuner: object not found yet (open it first)");
@@ -412,6 +447,22 @@ namespace
 		g_d.trans = Add(Mul(rl, Sub(g_d.trans, c)), c);
 	}
 
+	// move a pose by a camera-relative offset (right, up, forward), the way the numpad does
+	void MoveCameraSpace(Xf& a_d, float a_right, float a_up, float a_fwd)
+	{
+		if (!g_root) {
+			return;
+		}
+		const Mat   toLocal = Transpose(FromNi(g_root->world.rotate));
+		const float rootScale = g_root->world.scale > 1e-6F ? g_root->world.scale : 1.0F;
+		Vec right, up, fwd;
+		if (!CameraAxes(FromNi(g_root->world.translate), right, up, fwd)) {
+			return;
+		}
+		const Vec world = Add(Add(Scale(right, a_right), Scale(up, a_up)), Scale(fwd, a_fwd));
+		a_d.trans = Add(a_d.trans, Scale(Mul(toLocal, world), 1.0F / rootScale));
+	}
+
 	constexpr std::array<int, 16> kKeys{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x6E, 0x6F, 0 };
 }
 
@@ -455,71 +506,77 @@ namespace Tuner
 
 	void Load()
 	{
-		std::ifstream in(kSavePath);
-		if (!in) {
-			REX::INFO("tuner: no saved offset ({}), starting from the NIF placement", kSavePath);
-			return;
-		}
-		in.imbue(std::locale::classic());
-		std::string tag;
-		Xf d;
-		if ((in >> tag) && tag == "rot") {
-			for (auto& row : d.rot)
-				for (float& v : row) in >> v;
-		}
-		if ((in >> tag) && tag == "trans") {
-			in >> d.trans[0] >> d.trans[1] >> d.trans[2];
-		}
-		if (in) {
-			g_d = d;
-			REX::INFO("tuner: loaded saved offset, trans [{:.4f} {:.4f} {:.4f}]", d.trans[0], d.trans[1], d.trans[2]);
+		if (LoadXf(kSavePath, g_d)) {
+			REX::INFO("tuner: loaded saved offset, trans [{:.4f} {:.4f} {:.4f}]", g_d.trans[0], g_d.trans[1], g_d.trans[2]);
 		} else {
-			REX::WARN("tuner: could not parse {}", kSavePath);
+			REX::INFO("tuner: no saved offset ({}), starting from the NIF placement", kSavePath);
 		}
 	}
 
-	void Tick(bool a_isOpen)
+	void Tick(bool a_isOpen, bool a_keys, bool a_camera)
 	{
 		const auto now = std::chrono::steady_clock::now();
 		if (!a_isOpen) {
 			if (g_root) {
 				Release();
 			}
+			g_applied = Mode::kNone;
 			return;
+		}
+		const Mode mode = a_camera ? Mode::kCamera : (a_keys ? Mode::kNormal : Mode::kNone);
+		if (mode == Mode::kNone && g_applied == Mode::kNone) {
+			return;  // baked placement, nothing to do
 		}
 		// the object is re-created on every open; drop it once it is detached
 		if (g_root && !g_root->parent) {
 			Release();
 		}
 		Adopt();
-
-		// keys: act on press, then repeat every 60 ms while held
-		bool any = false;
-		for (std::size_t i = 0; i + 1 < kKeys.size(); ++i) {
-			const int  vk = kKeys[i];
-			const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
-			const bool pressed = down && !g_wasDown[i];
-			g_wasDown[i] = down;
-			if (!down) continue;
-			any = true;
-			if (vk == 0x60) {  // 0 reset
-				if (pressed) { g_d = Xf{}; REX::INFO("tuner: reset"); }
-			} else if (vk == 0x65) {  // 5 save
-				if (pressed) Save();
-			} else if (vk == 0x6E) {  // . fine / coarse
-				if (pressed) { g_fine = !g_fine; REX::INFO("tuner: {} steps", g_fine ? "fine" : "coarse"); }
-			} else if (pressed || now >= g_nextRepeat) {
-				Step(vk);
+		if (!g_root) {
+			return;
+		}
+		if (mode == Mode::kCamera && !g_camReady) {
+			g_camReady = true;
+			if (LoadXf(kCameraSavePath, g_cam)) {
+				REX::INFO("tuner: camera pose loaded from {}", kCameraSavePath);
+			} else {
+				// first guess until tuned: lower and a bit to the left, out of the upper right of the screen
+				MoveCameraSpace(g_cam, -0.05F, -0.16F, 0.0F);
+				REX::INFO("tuner: camera pose default (tune with the numpad on the Camera page, 5 saves)");
 			}
 		}
-		if (any && now >= g_nextRepeat) {
-			g_nextRepeat = now + std::chrono::milliseconds(60);
-		}
+		Xf* active = mode == Mode::kCamera ? &g_cam : mode == Mode::kNormal ? &g_d : nullptr;
 
-		if (g_root) {
-			for (std::size_t i = 0; i < g_children.size(); ++i) {
-				Apply(g_d, g_orig[i], g_children[i]->local);
+		// keys (dev_keys only): act on press, then repeat every 60 ms while held
+		if (a_keys && active) {
+			bool any = false;
+			for (std::size_t i = 0; i + 1 < kKeys.size(); ++i) {
+				const int  vk = kKeys[i];
+				const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+				const bool pressed = down && !g_wasDown[i];
+				g_wasDown[i] = down;
+				if (!down) continue;
+				any = true;
+				if (vk == 0x60) {  // 0 reset
+					if (pressed) { *active = Xf{}; REX::INFO("tuner: reset"); }
+				} else if (vk == 0x65) {  // 5 save
+					if (pressed) Save(*active, mode == Mode::kCamera ? kCameraSavePath : kSavePath);
+				} else if (vk == 0x6E) {  // . fine / coarse
+					if (pressed) { g_fine = !g_fine; REX::INFO("tuner: {} steps", g_fine ? "fine" : "coarse"); }
+				} else if (pressed || now >= g_nextRepeat) {
+					Step(vk, *active);
+				}
+			}
+			if (any && now >= g_nextRepeat) {
+				g_nextRepeat = now + std::chrono::milliseconds(60);
 			}
 		}
+
+		const Xf  identity{};
+		const Xf& use = active ? *active : identity;
+		for (std::size_t i = 0; i < g_children.size(); ++i) {
+			Apply(use, g_orig[i], g_children[i]->local);
+		}
+		g_applied = mode;
 	}
 }

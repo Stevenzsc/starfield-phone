@@ -7,7 +7,9 @@ namespace Tuner
 {
 	void Install();            // at plugin load (needs the SFSE trampoline)
 	void Load();               // read the saved offset (PhoneTest_offset.txt)
-	void Tick(bool a_isOpen);  // call often from the game's task queue
+	// call often from the game's task queue. a_keys = dev keys (numpad tunes the active pose), a_camera = the Camera
+	// page is shown (the phone takes its camera pose, PhoneTest_camera_offset.txt)
+	void Tick(bool a_isOpen, bool a_keys, bool a_camera);
 
 	// Hide / show the 1st-person body and the phone (for photos). Returns false if the branch was not found.
 	bool SetFirstPersonHidden(bool a_hide);
