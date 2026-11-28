@@ -145,6 +145,26 @@ namespace ViewProbe
 		}
 		LogViewList(outs, o0, "output0");
 		LogViewList(outs, o1, "output1");
+
+		// output columns (settings +0xE8 = 0x30 bytes, target +0xF0, ? +0xF8/+0x100, flag +0x108, +0x110 = 0x38,
+		// type/name +0x128 = 0x10): raw rows, to find the resolution fields
+		struct Col
+		{
+			std::uint32_t off;
+			std::size_t   stride;
+		};
+		static constexpr Col cols[] = { { 0xE8, 0x30 }, { 0xF0, 4 }, { 0xF8, 0x20 }, { 0x100, 0x20 }, { 0x108, 1 }, { 0x110, 0x38 },
+			{ 0x128, 0x10 } };
+		for (const auto o : { o0, o1 }) {
+			for (const auto& c : cols) {
+				const auto     col = Ptr(outs + c.off);
+				std::uintptr_t row = 0;
+				const bool     ok = col && Row(col, o & 0xFFFFFF, 0x2C8, c.stride, row);
+				REX::INFO("probe: output {:08X} col +{:X}: {}", o, c.off, ok ? Hex(row, c.stride) : std::string("unreadable"));
+			}
+		}
+		const auto desc0 = holder + 0x3E0;
+		REX::INFO("probe: output0 desc {}", Hex(desc0, 0x80));
 	}
 }
 
