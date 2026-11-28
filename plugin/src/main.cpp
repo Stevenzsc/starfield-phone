@@ -233,7 +233,7 @@ namespace
 	std::chrono::steady_clock::time_point g_lastAction{};
 
 
-	void Perform(const Binding& a_b);
+	bool Perform(const Binding& a_b);
 
 	void QueuePreloadOpen()
 	{
