@@ -964,11 +964,14 @@ namespace
 
 	// (task) the pose component of the arm's skeleton: the first ancestor of the clavicle whose +0x180 object has a
 	// plausible pose block; hook its class's +0x10 once
+	bool g_poseSearched = false;  // reset with the arm chain
+
 	void FindPoseComponent()
 	{
-		if (g_poseComp.load() || !g_arm.bones[0].node) {
+		if (g_poseComp.load() || g_poseSearched || !g_arm.bones[0].node) {
 			return;
 		}
+		g_poseSearched = true;
 		int depth = 0;
 		for (auto* n = g_arm.bones[0].node->parent; n && depth < 16; n = n->parent, ++depth) {
 			const auto    comp = ReadPtr(reinterpret_cast<std::uintptr_t>(n) + 0x180);
@@ -1007,7 +1010,7 @@ namespace
 				reinterpret_cast<std::uintptr_t>(vtbl));
 			return;
 		}
-		REX::WARN("arm: no pose component above the clavicle");
+		REX::INFO("arm: no pose component above the clavicle: the arm is driven by its NiNodes (task writes)");
 	}
 
 	// ---- the reliable point: the player's 1st-person 3D update ----
@@ -1044,6 +1047,17 @@ namespace
 		}
 		g_armWeight = a_weight;
 		FindPoseComponent();
+		// Two skeleton states were seen. With a pose component above the clavicle (HumanExportRoot, 473 bones) the
+		// component computes the bones and PoseUpdate_Hook does the work. Without one, the NiNode transforms are
+		// consistent (world = localRot * parentRot, zero error) and the method of the in-game tuning session works:
+		// offsets into the locals from the task, arm subtree worlds recomputed.
+		if (!g_poseComp.load()) {
+			for (int b = 0; b < kBones; ++b) {
+				ApplyBoneOffset(b);
+			}
+			auto* top = g_arm.bones[0].node;
+			UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
+		}
 
 		const auto now = std::chrono::steady_clock::now();
 		std::lock_guard lk(g_armLock);
@@ -1071,6 +1085,7 @@ namespace
 		g_pose = {};
 		g_arr = {};
 		g_poseComp = 0;
+		g_poseSearched = false;
 	}
 
 	// numpad on a bone: rotate about the bone's own axes (pairs: 8/2 4/6 7/9 and 1/3 / * - +)
