@@ -28,4 +28,7 @@ namespace Music
 	void Next();
 	void Prev();            // back to the start of the track, or the previous one in the first 3 s
 	void SetVolume(int a_percent);
+
+	// play quieter for a while (1 = normal, 0.25 = a quarter, e.g. during dialogue); fades over about half a second
+	void SetDuck(float a_level);
 }

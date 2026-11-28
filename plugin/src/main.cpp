@@ -26,6 +26,7 @@
 #include "camera.h"
 #include "gamepad.h"
 #include "gallery.h"
+#include "music.h"
 #include "screen.h"
 #include "tuner.h"
 #include "ui.h"
@@ -532,6 +533,8 @@ namespace
 
 	bool g_padNavHold = false;  // controller buttons used to open / close are still held
 
+	constexpr float kMusicDuck = 0.25f;  // music volume factor during dialogue
+
 	// a key or mouse button went down since the last check (checked every 50 ms; the task runs far more often)
 	bool KeyboardUsed()
 	{
@@ -798,6 +801,22 @@ namespace
 					REX::INFO("gallery: photo mode photo tagged '{}' gps {} {} {}", place, geo.gps, geo.lat, geo.lon);
 					Stats::HudNotify(place.empty() ? Tr("照片已保存（位置未知）") : Tr("照片已记录位置：") + place);
 				}
+			}
+		}
+
+		// Music app: lower the music while the player is in a conversation (DialogueMenu open), 4 checks a second.
+		// UI::IsMenuOpen = ID 130475 (UI*, BSFixedString*), UI singleton ID 937580.
+		static auto nextDuck = std::chrono::steady_clock::now();
+		if (std::chrono::steady_clock::now() >= nextDuck) {
+			nextDuck = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+			static const RE::BSFixedString kDialogueMenu{ "DialogueMenu" };
+			auto*                          ui = RE::UI::GetSingleton();
+			const bool                     talking = ui && ui->IsMenuOpen(kDialogueMenu);
+			static bool                    wasTalking = false;
+			if (talking != wasTalking) {
+				wasTalking = talking;
+				Music::SetDuck(talking ? kMusicDuck : 1.0f);
+				REX::INFO("music: dialogue {} -> volume x{}", talking ? "started" : "ended", talking ? kMusicDuck : 1.0f);
 			}
 		}
 

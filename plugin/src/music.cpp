@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cwctype>
 #include <deque>
@@ -43,6 +44,8 @@ namespace
 	bool                      g_started = false;
 	bool                      g_scanned = false;
 	std::atomic_uint32_t      g_seq{ 1 };
+	std::atomic<float>        g_duckTarget{ 1.0f };  // SetDuck
+	float                     g_duck = 1.0f;         // level applied now (worker thread only)
 
 	constexpr const wchar_t* kAlias = L"phonemusic";
 
@@ -97,7 +100,9 @@ namespace
 	void ApplyVolume(int a_percent)
 	{
 		if (g_open) {
-			Mci(std::wstring(L"setaudio ") + kAlias + L" volume to " + std::to_wstring(std::clamp(a_percent, 0, 100) * 10));
+			// MCI volume 0..1000; the duck level scales the user's volume
+			const int v = int(std::clamp(a_percent, 0, 100) * 10 * std::clamp(g_duck, 0.0f, 1.0f) + 0.5f);
+			Mci(std::wstring(L"setaudio ") + kAlias + L" volume to " + std::to_wstring(v));
 		}
 	}
 
@@ -182,7 +187,9 @@ namespace
 			bool has = false;
 			{
 				std::unique_lock lk(g_lock);
-				g_wake.wait_for(lk, std::chrono::milliseconds(250), [] { return !g_queue.empty(); });
+				// wake often while a duck fade runs
+				const bool fading = g_open && std::abs(g_duck - g_duckTarget.load()) > 0.001f;
+				g_wake.wait_for(lk, std::chrono::milliseconds(fading ? 40 : 250), [] { return !g_queue.empty(); });
 				if (!g_queue.empty()) {
 					cmd = g_queue.front();
 					g_queue.pop_front();
@@ -236,6 +243,17 @@ namespace
 				++g_seq;
 				continue;  // drain the queue before polling
 			}
+			// duck fade: about 0.5 s from full to a quarter (steps of 0.06 every 40 ms)
+			if (const float target = g_duckTarget.load(); std::abs(g_duck - target) > 0.001f) {
+				constexpr float kStep = 0.06f;
+				g_duck = g_duck < target ? std::min(target, g_duck + kStep) : std::max(target, g_duck - kStep);
+				int volume = 60;
+				{
+					std::lock_guard lk(g_lock);
+					volume = g_status.volume;
+				}
+				ApplyVolume(volume);
+			}
 			// progress, and the next track when this one ends
 			if (g_open && std::chrono::steady_clock::now() >= nextPoll) {
 				nextPoll = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
@@ -286,6 +304,18 @@ namespace Music
 	void Toggle() { Post(Cmd::kToggle); }
 	void Next() { Post(Cmd::kNext); }
 	void Prev() { Post(Cmd::kPrev); }
+
+	void SetDuck(float a_level)
+	{
+		const float level = std::clamp(a_level, 0.0f, 1.0f);
+		if (std::abs(g_duckTarget.exchange(level) - level) < 0.001f) {
+			return;
+		}
+		std::lock_guard lk(g_lock);
+		if (g_started) {
+			g_wake.notify_one();  // start the fade now
+		}
+	}
 
 	void SetVolume(int a_percent)
 	{
