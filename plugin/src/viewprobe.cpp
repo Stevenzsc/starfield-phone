@@ -295,12 +295,6 @@ namespace
 			std::uint8_t b[0x1C]{};
 			if (SafeRead(row, b, sizeof(b))) {
 				REX::INFO("view2: binding {}", Hex(row, 0x1C));
-				const float nearPlane = IniNear();
-				if (nearPlane > 0.0f) {
-					std::memcpy(b + 0x10, &nearPlane, 4);
-					CallSetBinding(reinterpret_cast<void*>(kSetViewBinding.address()), &g_view, b);
-					REX::INFO("view2: near plane set to {} -> binding {}", nearPlane, Hex(row, 0x1C));
-				}
 			}
 		}
 		g_created = true;
@@ -443,6 +437,38 @@ namespace
 		}
 	}
 
+	// Near plane of our view: geometry closer than this (the hand and the phone) is not drawn. Default 0.6; the ini
+	// key viewfinder_near overrides it and is re-read every second, so it can be tuned while the game runs.
+	constexpr float kDefaultNear = 0.6f;
+	float           g_nearApplied = -1.0f;
+	std::chrono::steady_clock::time_point g_nextNearCheck{};
+
+	void ApplyNear()
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (now < g_nextNearCheck) {
+			return;
+		}
+		g_nextNearCheck = now + std::chrono::seconds(1);
+		const float ini = IniNear();
+		const float want = ini > 0.0f ? ini : kDefaultNear;
+		if (want == g_nearApplied) {
+			return;
+		}
+		const auto     views = Ptr(kViewTable.address());
+		const auto     bind = views ? Ptr(views + 0x120) : 0;
+		std::uintptr_t row = 0;
+		std::uint8_t   b[0x1C]{};
+		if (!bind || !Row(bind, g_view & 0xFFFFFF, 0x2C8, 0x1C, row) || !SafeRead(row, b, sizeof(b))) {
+			return;
+		}
+		std::memcpy(b + 0x10, &want, 4);  // { scene, camera, flags, fov, near, far, u32 }
+		if (CallSetBinding(reinterpret_cast<void*>(kSetViewBinding.address()), &g_view, b)) {
+			g_nearApplied = want;
+			REX::INFO("view2: near plane {} (binding {})", want, Hex(row, 0x1C));
+		}
+	}
+
 	bool BuildOutput()
 	{
 		const auto holder = Ptr(kWorldHolder.address());
@@ -529,6 +555,7 @@ namespace ViewProbe
 			return;
 		case Stage::kReady: {
 			FollowMainCamera();
+			ApplyNear();
 			const auto now = std::chrono::steady_clock::now();
 			if (now < g_nextQueue) {
 				return;
