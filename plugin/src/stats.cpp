@@ -400,6 +400,12 @@ namespace
 		return reinterpret_cast<fn_t>(kIsDead.address())(nullptr, 0, a_actor);
 	}
 
+	// Actor.IsPlayerTeammate (native ID 116853): actor +0x208 bit 26 (companions following the player)
+	bool IsTeammate(const void* a_actor)
+	{
+		return At<std::uint8_t>(a_actor, 0x2E) == kTypeACHR && ((At<std::uint32_t>(a_actor, 0x208) >> 26) & 1);
+	}
+
 	bool IsHostile(void* a_actor, void* a_target)
 	{
 		using fn_t = bool (*)(void*, std::uint32_t, void*, void*);
@@ -475,9 +481,14 @@ namespace Stats
 		g.planet = Name(planet);
 		const auto chain = LocationChain(p);
 		if (!chain.empty() && chain[0] != g.planet) g.place = chain[0];
-		for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
-			if (!g.planet.empty() && chain[i] == g.planet) {  // the star system is the planet location's parent
-				g.system = chain[i + 1];
+		// the star system: the first parent above the planet's location(s) with another name (the chain can hold the
+		// planet name twice, e.g. 着陆区域 -> 霍金I -> 霍金I -> 霍金)
+		bool seenPlanet = false;
+		for (const auto& n : chain) {
+			if (!g.planet.empty() && n == g.planet) {
+				seenPlanet = true;
+			} else if (seenPlanet && !n.empty()) {
+				g.system = n;
 				break;
 			}
 		}
@@ -511,12 +522,20 @@ namespace Stats
 	{
 		std::vector<Ui::Contact> out;
 		auto*                    p = Player();
-		HomeShip                 ship;
-		if (!p || !ship.ref) return out;
+		if (!p) return out;
+		HomeShip   ship;
 		const auto me = PosOf(p);
 		const auto high = HighActors();
 		void*      myPlanet = PlanetOf(p);
-		for (const auto h : CrewHandles(ship.ref)) {
+		// ship crew (extra data 0xE2) plus companions following the player (loaded teammates)
+		auto handles = CrewHandles(ship.ref);
+		for (const auto h : high) {
+			RefPtr a(h);
+			if (a.ref && a.ref != p && IsTeammate(a.ref) && std::find(handles.begin(), handles.end(), h) == handles.end()) {
+				handles.push_back(h);
+			}
+		}
+		for (const auto h : handles) {
 			RefPtr a(h);
 			if (!a.ref || a.ref == p) continue;
 			Ui::Contact c;
@@ -540,7 +559,7 @@ namespace Stats
 		static bool logged = false;
 		if (!logged) {
 			logged = true;
-			REX::INFO("stats: {} crew on the home ship", out.size());
+			REX::INFO("stats: {} contacts (ship crew + following companions)", out.size());
 			for (const auto& c : out) REX::INFO("stats:   {:08X} '{}' {} dead {}", c.formID, c.name, c.where, c.dead);
 		}
 		return out;
@@ -580,7 +599,7 @@ namespace Stats
 			b.forward = dx * s + dy * c;
 			b.distance = d;
 			if (IsDead(a.ref)) b.kind = 3;
-			else if (std::find(crew.begin(), crew.end(), h) != crew.end()) b.kind = 2;
+			else if (IsTeammate(a.ref) || std::find(crew.begin(), crew.end(), h) != crew.end()) b.kind = 2;
 			else if (IsHostile(a.ref, p)) b.kind = 1;
 			out.push_back(std::move(b));
 		}
