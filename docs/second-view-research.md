@@ -48,3 +48,27 @@ The renderer keeps entity tables (ECS style). Handles are `index (24 bits) | gen
 3. Render target: create a texture row like `FUN_1403420f0` does and find its ID3D12Resource for the copy
    into the phone screen texture.
 4. Cost: a full 0x55 pipeline at phone resolution.
+
+## In-game results (probe, 2026-11-28)
+
+- Handles: world scene 01000000, env (+0x64) 01000000, main camera 01000001 / view 01000001,
+  second camera 01000002 / view 01000002, outputs 01000003 (type 0x55, view list [01000001]) and
+  01000004 (type 0x5A, empty).
+- View binding row (0x1C): { u32 scene, u32 camera, u8 flags.., float FOV 85, float near 0.05, float far 6000, u32 }.
+- Own camera + view through `FUN_142550860` works (camera handle 01000006, view 01000003, no crash), but putting the
+  view into output 01000004 shows nothing: that output is only submitted when there is no main view.
+
+## How outputs are submitted
+
+- `FUN_140840180` (per frame): view list = [active main view] -> written into output 01000003 every frame ->
+  `FUN_1429123a0(frame, holder+0x3E0)` appends the 0x80-byte output descriptor to the frame.
+- Output descriptor (0x80): BSTSmallArray of { void* target, texture*, u32 slot hash } (inline 4 x 0x18), +0x70
+  target object (0 for offscreen), +0x78 output handle. `FUN_142912210(desc, hash, &texture)` binds a texture to a
+  slot; the main output uses slot 0x9681900, output 01000004 uses 0x97C1900, the scanner 0x971AF00.
+- `FUN_140840B40(desc)` queues a descriptor (64-slot ring) for the renderer: the starmap scanner renders its
+  texture this way. Calling it once per frame should render our own output.
+- Render texture: `FUN_1428FC910(&BSFixedString name, &desc[0x48], &texture)`; scanner desc: +0 0x80, +4 width,
+  +8 height, +0xC 1, +0x10 2, +0x14 1, +0x18 0x2401, +0x2C 0x101006, +0x30 0x05040302, +0x38 1. Ready when
+  `(texture+0x14 & 0x70000000)` reaches the loaded state.
+- `Game.ShowFirstPersonGeometry` = `FUN_142009D70` (ID 117377): the cull bit on NiAVObject +0x118 does not hide
+  1st-person geometry from the renderer; this native does (player +0x112A bit 4).
