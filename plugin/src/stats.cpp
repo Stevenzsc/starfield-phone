@@ -322,6 +322,9 @@ namespace
 	// Outpost beacon data (ExtraData type 0xBC; MatchOutpostName FUN_142077350 writes the name at +0x70, a
 	// BSFixedString). FUN_140F51350(ref, create): with create = false a plain lookup, nullptr when not a beacon or none.
 	constexpr REL::ID kOutpostData{ 73983 };
+	// Actor.SheatheWeapon (FUN_141FCA870): actor->vfunc[0x9B0 / 8](actor, false). Actor.IsWeaponDrawn (ID 116861) is
+	// (actor +0xFC & 7) >= 3: the weapon state (0 sheathed, 1-2 drawing, 3 drawn, 4+ sheathing).
+	constexpr REL::ID kSheatheWeapon{ 116779 };
 
 	constexpr std::uint32_t kBeaconBase = 0x002C60E9;
 	constexpr std::uint8_t  kTypeREFR = 0x4A;
@@ -672,6 +675,20 @@ namespace Stats
 	}
 
 	void HudNotify(const std::string& a_utf8) { RunNative(kNotification, a_utf8); }
+
+	int WeaponState()
+	{
+		const auto* p = Player();
+		return p ? (At<std::uint8_t>(p, 0xFC) & 7) : 0;
+	}
+
+	void SheatheWeapon()
+	{
+		auto* p = Player();
+		if (!p) return;
+		using fn_t = void (*)(void*, std::uint32_t, void*);
+		reinterpret_cast<fn_t>(kSheatheWeapon.address())(nullptr, 0, p);
+	}
 
 	// The native returns early while the audio system is not up, and only touches the VM argument to log an empty
 	// name, so callers must pass a non-empty ID.

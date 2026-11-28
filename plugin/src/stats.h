@@ -31,6 +31,11 @@ namespace Stats
 	// show a line in the game's HUD notification area (Papyrus Debug.Notification)
 	void HudNotify(const std::string& a_utf8);
 
+	// the player's weapon state: 0 sheathed, 1-2 drawing, 3 drawn, 4+ sheathing (Actor +0xFC & 7)
+	int WeaponState();
+	// put the player's weapon away (Papyrus Actor.SheatheWeapon)
+	void SheatheWeapon();
+
 	// play a game UI sound by its Wwise event name ("UIMenuGeneralFocus"; Papyrus WwiseEvent.PlayMenuSound)
 	void PlayUiSound(const char* a_id);
 

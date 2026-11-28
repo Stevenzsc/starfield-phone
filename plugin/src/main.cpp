@@ -554,9 +554,23 @@ namespace
 		return used;
 	}
 
+	// weapon out when the phone was asked for: holster it first, open once it is away (or after a timeout)
+	std::chrono::steady_clock::time_point g_holsterUntil{};
+	bool                                  g_holstering = false;
+
 	// take the phone out or put it away (open key, controller gesture, B on the home screen)
-	void TogglePhone()
+	void TogglePhone(bool a_afterHolster = false)
 	{
+		if (!a_afterHolster && !g_open) {
+			if (g_holstering) return;  // already putting the weapon away for the phone
+			if (const int state = Stats::WeaponState(); state != 0) {
+				REX::INFO("phone: weapon out (state {}), holstering first", state);
+				Stats::SheatheWeapon();
+				g_holstering = true;
+				g_holsterUntil = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+				return;
+			}
+		}
 		const auto ready = g_lastAction + kActionGap;
 		if (std::chrono::steady_clock::now() < ready) {
 			// the raise / lower animation is still playing: an action now freezes the view (seen in game) -> queue it
@@ -690,6 +704,24 @@ namespace
 			CycleModel();
 		}
 		g_cycleDown = cycle;
+
+		// holstering for the phone: open 0.25 s after the weapon is away (the hands are free by then); give up waiting
+		// after 2 s and open anyway
+		if (g_holstering) {
+			static bool away = false;
+			const auto  now = std::chrono::steady_clock::now();
+			const int   state = Stats::WeaponState();
+			if (state == 0 && !away) {
+				away = true;
+				g_holsterUntil = now + std::chrono::milliseconds(250);
+			}
+			if (now >= g_holsterUntil) {
+				if (!away) REX::INFO("phone: weapon still out (state {}) after 2 s, opening anyway", state);
+				away = false;
+				g_holstering = false;
+				TogglePhone(true);
+			}
+		}
 
 		if (!g_steps.empty() && std::chrono::steady_clock::now() >= g_steps.front().at) {
 			const auto b = g_steps.front().binding;
