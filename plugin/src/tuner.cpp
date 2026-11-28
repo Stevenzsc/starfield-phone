@@ -9,6 +9,7 @@
 
 #include "pch.h"
 #include "tuner.h"
+#include "ui.h"
 
 #include <algorithm>
 #include <array>
@@ -483,22 +484,35 @@ namespace
 	}
 
 
-	// ---- arm pose (experiment): rotate the 1st-person left upper arm while the Camera page is shown ----
-	// Bones are found from the phone up (PhoneAnimObjectRoot < L_AnimObject1 < L_Wrist < L_Forearm < L_Biceps), so the
-	// 3rd-person skeleton with the same names is never touched. Every tick: take the bone's local transform as the
-	// animation left it (or the copy kept from the last tick when nothing rewrote it), apply the test rotation, then
-	// recompute the world transforms of the whole subtree (arm, hand, phone) with the engine's own convention, which
-	// is detected from the existing transforms. Logged once per second.
-	struct ArmState
+	// ---- arm pose: rotation offsets for the 1st-person left arm bones while the Camera page is shown ----
+	// Bones are found from the phone up (PhoneAnimObjectRoot < L_AnimObject1 < L_Wrist < L_Forearm < L_Biceps <
+	// L_Clavicle), so the 3rd-person skeleton with the same names is never touched. Every tick: take each bone's local
+	// transform as the animation left it (or the copy kept from the last tick when nothing rewrote it), multiply in
+	// its offset (blended by the camera-pose weight), then recompute the world transforms of the arm subtree (arm,
+	// hand, phone) with the engine's convention, detected from the untouched transforms.
+	constexpr const char* kArmSavePath = "Data\\SFSE\\Plugins\\PhoneTest_arm_pose.txt";
+	constexpr int         kBones = 4;  // 0 clavicle, 1 upper arm, 2 forearm, 3 wrist
+	constexpr const char* kBoneLabels[kBones] = { "锁骨", "上臂", "前臂", "手腕" };
+
+	struct Bone
 	{
-		RE::NiAVObject* biceps = nullptr;
-		RE::NiTransform animLocal{};  // the animation's local transform of L_Biceps (before our rotation)
+		RE::NiAVObject* node = nullptr;
+		RE::NiTransform animLocal{};  // the animation's local transform (before our offset)
 		RE::NiTransform written{};    // what we wrote last tick
 		bool            haveWritten = false;
-		int             conv = -1;    // 0: world = parentRot * localRot (column vectors), 1: localRot * parentRot
-		int             ticks = 0, rewritten = 0;
+	};
+	struct ArmState
+	{
+		Bone bones[kBones];
+		int  conv = -1;  // 0: world = parentRot * localRot, 1: localRot * parentRot (1 measured in game)
+		int  ticks = 0, rewritten = 0;
 		std::chrono::steady_clock::time_point nextLog{};
 	} g_arm;
+
+	constexpr Mat kIdentity{ { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } } };
+	Mat  g_boneRot[kBones] = { kIdentity, kIdentity, kIdentity, kIdentity };  // tuned offsets
+	bool g_armLoaded = false;
+	int  g_target = 0;  // numpad target on the Camera page: 0 phone, 1..4 bones
 
 	bool SameXf(const RE::NiTransform& a, const RE::NiTransform& b)
 	{
@@ -573,88 +587,144 @@ namespace
 		}
 	}
 
-	// PhoneTest.ini arm_test=<degrees>,<axis 0..2> (0 degrees = off)
-	void IniArmTest(float& a_deg, int& a_axis)
+	void SaveArm()
 	{
-		a_deg = 30.0F;
-		a_axis = 2;
-		std::ifstream in("Data\\SFSE\\Plugins\\PhoneTest.ini");
-		std::string   line;
-		while (std::getline(in, line)) {
-			if (line.rfind("arm_test=", 0) == 0) {
-				std::sscanf(line.c_str() + 9, "%f,%d", &a_deg, &a_axis);
+		std::ofstream out(kArmSavePath, std::ios::trunc);
+		out.imbue(std::locale::classic());
+		for (int b = 0; b < kBones; ++b) {
+			out << "bone " << b;
+			for (auto& row : g_boneRot[b])
+				for (float v : row)
+					out << ' ' << v;
+			out << '\n';
+		}
+		REX::INFO("arm: pose saved to {}", kArmSavePath);
+	}
+
+	void LoadArm()
+	{
+		std::ifstream in(kArmSavePath);
+		if (!in) {
+			REX::INFO("arm: no saved pose ({})", kArmSavePath);
+			return;
+		}
+		in.imbue(std::locale::classic());
+		std::string tag;
+		int         b = 0;
+		while (in >> tag >> b) {
+			Mat m{};
+			for (auto& row : m)
+				for (float& v : row) in >> v;
+			if (tag == "bone" && b >= 0 && b < kBones && in) {
+				g_boneRot[b] = m;
 			}
 		}
-		a_axis = std::clamp(a_axis, 0, 2);
+		REX::INFO("arm: pose loaded from {}", kArmSavePath);
+	}
+
+	bool FindArm()
+	{
+		if (!g_root || !g_root->parent || !g_root->parent->parent) {
+			return false;
+		}
+		RE::NiAVObject* chain[kBones]{};
+		chain[3] = g_root->parent->parent;  // L_AnimObject1 -> L_Wrist
+		for (int b = 2; b >= 0; --b) {
+			chain[b] = chain[b + 1] ? chain[b + 1]->parent : nullptr;
+		}
+		if (!chain[0] || !chain[0]->parent) {
+			return false;
+		}
+		if (chain[1] != g_arm.bones[1].node) {
+			g_arm = {};
+			for (int b = 0; b < kBones; ++b) {
+				g_arm.bones[b].node = chain[b];
+			}
+			REX::INFO("arm: chain {} < {} < {} < {} < {}", NameOf(chain[3]), NameOf(chain[2]), NameOf(chain[1]), NameOf(chain[0]),
+				NameOf(chain[0]->parent));
+			RE::NiTransform w0{}, w1{};
+			ComposeWorld(chain[1]->parent->world, chain[1]->local, 0, w0);
+			ComposeWorld(chain[1]->parent->world, chain[1]->local, 1, w1);
+			const float e0 = XfError(w0, chain[1]->world), e1 = XfError(w1, chain[1]->world);
+			g_arm.conv = e0 <= e1 ? 0 : 1;
+			REX::INFO("arm: world convention {} (error {:.5f} vs {:.5f})", g_arm.conv, e0, e1);
+		}
+		return true;
 	}
 
 	void ArmTick(float a_weight)
 	{
-		if (!g_root || !g_root->parent || !g_root->parent->parent) {
+		if (!FindArm()) {
 			return;
-		}
-		auto* wrist = g_root->parent->parent;  // L_AnimObject1 -> L_Wrist
-		auto* forearm = wrist->parent;
-		auto* biceps = forearm ? forearm->parent : nullptr;
-		if (!biceps || !biceps->parent) {
-			return;
-		}
-		if (biceps != g_arm.biceps) {
-			g_arm = {};
-			g_arm.biceps = biceps;
-			REX::INFO("arm: chain {} < {} < {} < {}", NameOf(wrist), NameOf(forearm), NameOf(biceps), NameOf(biceps->parent));
-		}
-		// convention, from the untouched transforms (before our first write)
-		if (g_arm.conv < 0) {
-			RE::NiTransform w0{}, w1{};
-			ComposeWorld(biceps->parent->world, biceps->local, 0, w0);
-			ComposeWorld(biceps->parent->world, biceps->local, 1, w1);
-			const float e0 = XfError(w0, biceps->world), e1 = XfError(w1, biceps->world);
-			g_arm.conv = e0 <= e1 ? 0 : 1;
-			REX::INFO("arm: world convention {} (error {:.5f} vs {:.5f})", g_arm.conv, e0, e1);
 		}
 		++g_arm.ticks;
-		const bool rewritten = !g_arm.haveWritten || !SameXf(biceps->local, g_arm.written);
-		if (rewritten) {
-			++g_arm.rewritten;
-			g_arm.animLocal = biceps->local;  // fresh from the animation
+		for (int b = 0; b < kBones; ++b) {
+			auto& bone = g_arm.bones[b];
+			const bool rewritten = !bone.haveWritten || !SameXf(bone.node->local, bone.written);
+			if (rewritten) {
+				bone.animLocal = bone.node->local;  // fresh from the animation
+				if (b == 1) ++g_arm.rewritten;
+			}
+			Xf off;
+			off.rot = g_boneRot[b];
+			const Mat       d = a_weight >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, a_weight).rot;
+			RE::NiTransform out = bone.animLocal;
+			SetMat(out.rotate, Mul(MatOf(bone.animLocal), d));
+			bone.node->local = out;
+			bone.written = out;
+			bone.haveWritten = true;
 		}
-		float deg = 0;
-		int   axis = 2;
-		static auto nextIni = std::chrono::steady_clock::now();
-		static float iniDeg = 30.0F;
-		static int   iniAxis = 2;
-		if (std::chrono::steady_clock::now() >= nextIni) {
-			nextIni = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-			IniArmTest(iniDeg, iniAxis);
-		}
-		deg = iniDeg * a_weight;
-		axis = iniAxis;
-		Vec ax{ 0, 0, 0 };
-		ax[axis] = 1;
-		RE::NiTransform out = g_arm.animLocal;
-		SetMat(out.rotate, Mul(MatOf(g_arm.animLocal), AxisAngle(ax, deg * std::numbers::pi_v<float> / 180.0F)));
-		biceps->local = out;
-		g_arm.written = out;
-		g_arm.haveWritten = true;
-		UpdateSubtreeWorld(biceps, g_arm.conv, *reinterpret_cast<void* const*>(biceps));
+		auto* top = g_arm.bones[0].node;
+		UpdateSubtreeWorld(top, g_arm.conv, *reinterpret_cast<void* const*>(top));
 
 		const auto now = std::chrono::steady_clock::now();
 		if (now >= g_arm.nextLog) {
-			g_arm.nextLog = now + std::chrono::seconds(1);
-			REX::INFO("arm: {} ticks, local rewritten by the game in {} of them; test {:.1f} deg about axis {}", g_arm.ticks,
-				g_arm.rewritten, deg, axis);
+			g_arm.nextLog = now + std::chrono::seconds(5);
+			REX::INFO("arm: {} ticks, upper arm rewritten by the game in {} of them", g_arm.ticks, g_arm.rewritten);
 			g_arm.ticks = g_arm.rewritten = 0;
 		}
 	}
 
 	void ArmRelease()
 	{
-		if (g_arm.biceps && g_arm.haveWritten && SameXf(g_arm.biceps->local, g_arm.written)) {
-			g_arm.biceps->local = g_arm.animLocal;  // nothing rewrote it: put the animation's value back
-			UpdateSubtreeWorld(g_arm.biceps, g_arm.conv, *reinterpret_cast<void* const*>(g_arm.biceps));
+		bool any = false;
+		for (auto& bone : g_arm.bones) {
+			if (bone.node && bone.haveWritten && SameXf(bone.node->local, bone.written)) {
+				bone.node->local = bone.animLocal;  // nothing rewrote it: put the animation's value back
+				any = true;
+			}
+		}
+		if (any && g_arm.bones[0].node) {
+			auto* top = g_arm.bones[0].node;
+			UpdateSubtreeWorld(top, g_arm.conv, *reinterpret_cast<void* const*>(top));
 		}
 		g_arm = {};
+	}
+
+	// numpad on a bone: rotate about the bone's own axes (pairs: 8/2 4/6 7/9 and 1/3 / * - +)
+	void BoneStep(int a_key, int a_bone, bool a_coarse)
+	{
+		const float ang = (a_coarse ? 5.0F : 1.0F) * std::numbers::pi_v<float> / 180.0F;
+		int         axis = 0;
+		float       sign = 1;
+		switch (a_key) {
+		case 0x68: axis = 0, sign = 1; break;   // 8
+		case 0x62: axis = 0, sign = -1; break;  // 2
+		case 0x64: axis = 1, sign = 1; break;   // 4
+		case 0x66: axis = 1, sign = -1; break;  // 6
+		case 0x67: axis = 2, sign = 1; break;   // 7
+		case 0x69: axis = 2, sign = -1; break;  // 9
+		case 0x61: axis = 0, sign = 1; break;   // 1
+		case 0x63: axis = 0, sign = -1; break;  // 3
+		case 0x6F: axis = 1, sign = 1; break;   // /
+		case 0x6A: axis = 1, sign = -1; break;  // *
+		case 0x6D: axis = 2, sign = 1; break;   // -
+		case 0x6B: axis = 2, sign = -1; break;  // +
+		default: return;
+		}
+		Vec ax{ 0, 0, 0 };
+		ax[axis] = 1;
+		g_boneRot[a_bone] = Mul(g_boneRot[a_bone], AxisAngle(ax, sign * ang));
 	}
 
 	constexpr std::array<int, 16> kKeys{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x6E, 0x6F, 0 };
@@ -723,6 +793,7 @@ namespace Tuner
 			g_applied = Mode::kNone;
 			weight = 0.0F;
 			g_arm = {};
+			g_target = 0;
 			return;
 		}
 		weight = a_camera ? std::min(1.0F, weight + dt / kBlendTime) : std::max(0.0F, weight - dt / kBlendTime);
@@ -740,6 +811,10 @@ namespace Tuner
 		}
 		if (mode == Mode::kCamera && !g_camReady) {
 			g_camReady = true;
+			if (!g_armLoaded) {
+				g_armLoaded = true;
+				LoadArm();
+			}
 			if (LoadXf(kCameraSavePath, g_cam)) {
 				REX::INFO("tuner: camera pose loaded from {}", kCameraSavePath);
 			} else {
@@ -751,9 +826,12 @@ namespace Tuner
 		// the numpad tunes the camera pose only while the Camera page is shown (fully blended in)
 		Xf* active = a_camera ? &g_cam : a_keys ? &g_d : nullptr;
 
-		// keys (dev_keys only): act on press, then repeat every 60 ms while held
+		// keys (dev_keys only): act on press, then repeat every 60 ms while held.
+		// Camera page: '.' cycles the target (phone, clavicle, upper arm, forearm, wrist), 0 resets it, Ctrl = coarse
+		// steps, 5 saves the phone pose and the arm pose. Elsewhere: the old tuner ('.' toggles fine / coarse).
 		if (a_keys && active) {
-			bool any = false;
+			const bool coarse = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+			bool       any = false;
 			for (std::size_t i = 0; i + 1 < kKeys.size(); ++i) {
 				const int  vk = kKeys[i];
 				const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
@@ -761,10 +839,40 @@ namespace Tuner
 				g_wasDown[i] = down;
 				if (!down) continue;
 				any = true;
+				if (a_camera) {
+					if (vk == 0x6E) {  // . next target
+						if (pressed) {
+							g_target = (g_target + 1) % (kBones + 1);
+							const char* label = g_target == 0 ? "手机" : kBoneLabels[g_target - 1];
+							Ui::SetCameraStatus(std::string("小键盘调整：") + label);
+							REX::INFO("tuner: target {}", g_target);
+						}
+					} else if (vk == 0x60) {  // 0 reset the target
+						if (pressed) {
+							if (g_target == 0) g_cam = Xf{};
+							else g_boneRot[g_target - 1] = kIdentity;
+							Ui::SetCameraStatus("已重置");
+						}
+					} else if (vk == 0x65) {  // 5 save both
+						if (pressed) {
+							Save(g_cam, kCameraSavePath);
+							SaveArm();
+							Ui::SetCameraStatus("姿势已保存");
+						}
+					} else if (pressed || now >= g_nextRepeat) {
+						if (g_target == 0) {
+							g_fine = !coarse;
+							Step(vk, g_cam);
+						} else {
+							BoneStep(vk, g_target - 1, coarse);
+						}
+					}
+					continue;
+				}
 				if (vk == 0x60) {  // 0 reset
 					if (pressed) { *active = Xf{}; REX::INFO("tuner: reset"); }
 				} else if (vk == 0x65) {  // 5 save
-					if (pressed) Save(*active, a_camera ? kCameraSavePath : kSavePath);
+					if (pressed) Save(*active, kSavePath);
 				} else if (vk == 0x6E) {  // . fine / coarse
 					if (pressed) { g_fine = !g_fine; REX::INFO("tuner: {} steps", g_fine ? "fine" : "coarse"); }
 				} else if (pressed || now >= g_nextRepeat) {
@@ -785,7 +893,7 @@ namespace Tuner
 		g_applied = mode;
 		if (weight > 0.0F) {
 			ArmTick(s);
-		} else if (g_arm.biceps) {
+		} else if (g_arm.bones[0].node) {
 			ArmRelease();
 		}
 	}
