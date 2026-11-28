@@ -469,13 +469,36 @@ namespace
 		}
 	}
 
-	// Feature flags of a view: 0x210 bytes in view column +0x108 (FUN_14083FC30 copies that much). FUN_142550860
-	// fills ours from the global settings with bits 22, 34, 38 and 43 cleared, and that view drew no characters or
-	// ships and less detail: give it the main view's flags instead.
-	constexpr REL::ID kSetViewFlags{ 128330 };  // FUN_14248D200(&view, flags[0x210])
-	constexpr std::size_t kFlagsSize = 0x210;
+	// Feature flags of a view: 0x210 bytes in view column +0x108 (FUN_14083FC30 copies that much); the first u64 is
+	// the feature bits. FUN_142550860 fills ours from the global settings with bits 22, 34, 38 and 43 cleared: that
+	// view drew no characters or ships; copying all four from the main view made the output black. The ini key
+	// viewfinder_bits (hex) picks which of the main view's bits to copy; it is re-read every second.
+	constexpr REL::ID       kSetViewFlags{ 128330 };  // FUN_14248D200(&view, flags[0x210])
+	constexpr std::size_t   kFlagsSize = 0x210;
+	constexpr std::uint64_t kCandidateBits = (1ull << 22) | (1ull << 34) | (1ull << 38) | (1ull << 43);
+	constexpr std::uint64_t kDefaultBits = (1ull << 34) | (1ull << 38) | (1ull << 43);
+	alignas(16) std::uint8_t g_baseFlags[kFlagsSize]{};  // ours as the helper made them
+	bool                     g_haveBase = false;
+	std::uint64_t            g_bitsApplied = ~0ull;
 
-	void CopyMainViewFlags()
+	std::uint64_t IniBits()
+	{
+		std::FILE* f = nullptr;
+		if (fopen_s(&f, "Data\SFSE\Plugins\PhoneTest.ini", "r") != 0 || !f) {
+			return kDefaultBits;
+		}
+		char          line[256];
+		std::uint64_t v = kDefaultBits;
+		while (std::fgets(line, sizeof(line), f)) {
+			if (std::strncmp(line, "viewfinder_bits=", 16) == 0) {
+				v = std::strtoull(line + 16, nullptr, 16);
+			}
+		}
+		std::fclose(f);
+		return v & kCandidateBits;
+	}
+
+	void ApplyViewBits()
 	{
 		const auto holder = Ptr(kWorldHolder.address());
 		const auto views = Ptr(kViewTable.address());
@@ -483,25 +506,33 @@ namespace
 		if (!holder || !col) {
 			return;
 		}
-		const std::uint32_t mainView = U32(holder + 0x3D0);
-		std::uintptr_t      mainRow = 0, ourRow = 0;
-		alignas(16) std::uint8_t flags[kFlagsSize]{};
-		if (!Row(col, mainView & 0xFFFFFF, 0x2C8, kFlagsSize, mainRow) || !SafeRead(mainRow, flags, sizeof(flags))) {
-			REX::WARN("view2: main view flags unreadable");
+		std::uintptr_t row = 0;
+		if (!g_haveBase) {
+			if (!Row(col, g_view & 0xFFFFFF, 0x2C8, kFlagsSize, row) || !SafeRead(row, g_baseFlags, kFlagsSize)) {
+				return;
+			}
+			g_haveBase = true;
+		}
+		const std::uint64_t bits = IniBits();
+		if (bits == g_bitsApplied) {
 			return;
 		}
-		const bool haveOurs = Row(col, g_view & 0xFFFFFF, 0x2C8, kFlagsSize, ourRow);
-		REX::INFO("view2: main view flags {}", Hex(mainRow, 0x20));
-		if (haveOurs) {
-			REX::INFO("view2: our view flags before {}", Hex(ourRow, 0x20));
+		std::uint64_t mainBits = 0;
+		if (!Row(col, U32(holder + 0x3D0) & 0xFFFFFF, 0x2C8, kFlagsSize, row) || !Rd(row, mainBits)) {
+			return;
 		}
+		alignas(16) std::uint8_t flags[kFlagsSize];
+		std::memcpy(flags, g_baseFlags, kFlagsSize);
+		std::uint64_t ours = 0;
+		std::memcpy(&ours, flags, 8);
+		ours = (ours & ~bits) | (mainBits & bits);
+		std::memcpy(flags, &ours, 8);
 		if (!Call(kSetViewFlags, A(&g_view), A(flags))) {
 			REX::ERROR("view2: setting the view flags faulted");
 			return;
 		}
-		if (haveOurs) {
-			REX::INFO("view2: our view flags after {}", Hex(ourRow, 0x20));
-		}
+		g_bitsApplied = bits;
+		REX::INFO("view2: view bits from main {:X} -> ours {:016X} (main {:016X})", bits, ours, mainBits);
 	}
 
 	bool BuildOutput()
@@ -562,7 +593,6 @@ namespace ViewProbe
 				g_stage = Stage::kFailed;
 				return;
 			}
-			CopyMainViewFlags();
 			{
 				// frustum matching the target's aspect: { left, right, top, bottom }, 60 degrees vertical
 				const auto  cam = *reinterpret_cast<std::uintptr_t*>(g_obj + 0x18);
@@ -592,6 +622,13 @@ namespace ViewProbe
 		case Stage::kReady: {
 			FollowMainCamera();
 			ApplyNear();
+			{
+				static auto next = std::chrono::steady_clock::now();
+				if (std::chrono::steady_clock::now() >= next) {
+					next = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+					ApplyViewBits();
+				}
+			}
 			const auto now = std::chrono::steady_clock::now();
 			if (now < g_nextQueue) {
 				return;
