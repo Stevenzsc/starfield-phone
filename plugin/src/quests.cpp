@@ -22,6 +22,11 @@ namespace
 	constexpr std::ptrdiff_t kObjArray = 0x150;
 	constexpr std::ptrdiff_t kObjState = 0x28;
 	constexpr int            kStateDisplayed = 1;
+	// Quest.IsActive / SetActive (Papyrus natives registered in FUN_1420CCAF0): "active" = tracked = bit 11 (0x800)
+	// of +0x114. SetActive's native (FUN_1420CDE80, ID 119077) flips that bit, calls FUN_141A42E70 first when
+	// activating, then notifies with FUN_140CF2750; its VM and stack-ID arguments are unused.
+	constexpr std::uint32_t kTrackedBit = 0x800;
+	constexpr REL::ID       kQuestSetActive{ 119077 };
 	constexpr std::ptrdiff_t kDnamPriority = 0x118;  // DNAM byte 4 = priority (verified: MQ402 90, misc 30-50)
 	// QTYP (loader writes param_1[0x24]): the quest-type keyword; a form ID at load, a KYWD pointer once resolved
 	constexpr std::ptrdiff_t kQuestTypeKeyword = 0x120;
@@ -185,6 +190,8 @@ namespace Quests
 			if (entry.name.empty()) {
 				entry.name = q->GetFormEditorID() ? q->GetFormEditorID() : "?";
 			}
+			entry.formID = q->GetFormID();
+			entry.tracked = (Read<std::uint32_t>(q, kQuestFlags) & kTrackedBit) != 0;
 			const auto* type = TypeOf(q);
 			entry.group = type ? type->label : "其他";
 			keyed.push_back({ type ? type->rank : 99, Read<std::uint8_t>(q, kDnamPriority), q, std::move(entry) });
@@ -207,5 +214,20 @@ namespace Quests
 		}
 		logged = logged || !keyed.empty();
 		return result;
+	}
+
+	bool SetTracked(std::uint32_t a_formID, bool a_tracked)
+	{
+		auto* quest = RE::TESForm::LookupByID(a_formID);
+		if (!quest || Read<std::uint8_t>(quest, 0x2E) != kQuestType) {
+			REX::WARN("quests: {:08X} is not a quest", a_formID);
+			return false;
+		}
+		using setActive_t = void (*)(void* a_vm, std::uint32_t a_stackID, RE::TESForm* a_quest, bool a_active);
+		reinterpret_cast<setActive_t>(kQuestSetActive.address())(nullptr, 0, quest, a_tracked);
+		const bool now = (Read<std::uint32_t>(quest, kQuestFlags) & kTrackedBit) != 0;
+		REX::INFO("quests: {} {:08X} '{}' -> tracked {}", a_tracked ? "track" : "untrack", a_formID,
+			quest->GetFormEditorID() ? quest->GetFormEditorID() : "", now);
+		return now == a_tracked;
 	}
 }

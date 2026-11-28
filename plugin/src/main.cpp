@@ -403,6 +403,14 @@ namespace
 				case Ui::Action::kSettingsChanged:
 					SaveSettings();
 					break;
+				case Ui::Action::kToggleTrack: {
+					const auto sel = Ui::SelectedQuest();
+					if (sel.formID) {
+						Quests::SetTracked(sel.formID, !sel.tracked);
+						Ui::SetQuests(Quests::CollectActive(40));  // show the new state right away
+					}
+					break;
+				}
 				case Ui::Action::kOpenPhotoMode:
 					// put the phone away, then open photo mode once the hand is down
 					Perform(kBindings[1]);

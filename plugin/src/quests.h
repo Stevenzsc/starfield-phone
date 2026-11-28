@@ -9,4 +9,7 @@
 namespace Quests
 {
 	std::vector<Ui::QuestEntry> CollectActive(std::size_t a_maxQuests);
+
+	// Track / untrack a quest exactly like Papyrus Quest.SetActive (shows it in the HUD and on the compass).
+	bool SetTracked(std::uint32_t a_formID, bool a_tracked);
 }

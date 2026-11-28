@@ -280,7 +280,7 @@ namespace
 		int brightness = 100;
 		int openKey = 0;
 		// quests
-		int questScroll = 0;  // index of the first quest shown
+		int questScroll = 0;  // selected quest (drawn first, highlighted)
 		// safe area (fractions of the upright screen)
 		float insetL = 0, insetT = 0, insetR = 0, insetB = 0;
 	};
@@ -478,16 +478,28 @@ namespace
 				Text(c, pad, y, q.group.c_str(), objF * 0.9f, { 150, 200, 255 }, 0.95f);
 				y += int(objF * 1.5f);
 			}
-			const auto  nameLines = Wrap(q.name, nameF, c.w - 2 * pad);
+			const std::string title = q.tracked ? "★ " + q.name : q.name;
+			const auto        nameLines = Wrap(title, nameF, c.w - 2 * pad);
 			if (shown > 0 && y + int(nameF * 1.3f) * int(nameLines.size()) > bottom) {
 				break;
 			}
+			std::vector<std::vector<std::string>> objLines;
+			int                                   blockH = int(nameF * 1.3f) * int(nameLines.size());
+			for (const auto& o : q.objectives) {
+				objLines.push_back(Wrap(o, objF, c.w - 2 * pad - int(objF * 1.2f)));
+				blockH += int(objF * 1.3f) * int(objLines.back().size());
+			}
+			if (i == first) {  // selection highlight
+				const int hb = std::min(blockH, bottom - y) + int(H * 0.012f);
+				RoundRect(c, pad - int(W * 0.025f), y - int(H * 0.006f), c.w - 2 * pad + int(W * 0.05f), hb, int(H * 0.02f),
+					{ 255, 255, 255 }, { 255, 255, 255 }, 0.16f);
+			}
+			const Rgb nameColor = q.tracked ? Rgb{ 255, 214, 10 } : Rgb{ 240, 240, 245 };
 			for (const auto& l : nameLines) {
-				Text(c, pad, y, l.c_str(), nameF, { 255, 214, 10 });
+				Text(c, pad, y, l.c_str(), nameF, nameColor);
 				y += int(nameF * 1.3f);
 			}
-			for (const auto& o : q.objectives) {
-				const auto lines = Wrap(o, objF, c.w - 2 * pad - int(objF * 1.2f));
+			for (const auto& lines : objLines) {
 				for (std::size_t k = 0; k < lines.size(); ++k) {
 					if (y + int(objF * 1.3f) > bottom) break;
 					if (k == 0) Text(c, pad, y, "•", objF, { 220, 230, 245 });
@@ -500,7 +512,8 @@ namespace
 			if (y > bottom) break;
 		}
 		char hint[64];
-		std::snprintf(hint, sizeof(hint), "↑↓ 翻页   %d / %d", first + 1, int(g_quests.size()));
+		std::snprintf(hint, sizeof(hint), "↑↓ 选择  回车 %s   %d/%d", g_quests[first].tracked ? "取消追踪" : "追踪", first + 1,
+			int(g_quests.size()));
 		DrawHint(c, hint);
 	}
 
@@ -606,6 +619,12 @@ namespace Ui
 			switch (a_key) {
 			case Key::kUp: st.questScroll = std::max(0, st.questScroll - 1); break;
 			case Key::kDown: st.questScroll = std::min(std::max(0, int(g_quests.size()) - 1), st.questScroll + 1); break;
+			case Key::kEnter:
+				if (g_quests.empty()) {
+					return Action::kNone;
+				}
+				act = Action::kToggleTrack;
+				break;
 			case Key::kBack: st.page = kHome; break;
 			default: return Action::kNone;
 			}
@@ -653,10 +672,28 @@ namespace Ui
 		return g_state.page == kQuestsPage;
 	}
 
+	QuestEntry SelectedQuest()
+	{
+		std::lock_guard lk(g_lock);
+		if (g_state.page != kQuestsPage || g_quests.empty()) {
+			return {};
+		}
+		return g_quests[std::clamp(g_state.questScroll, 0, int(g_quests.size()) - 1)];
+	}
+
 	void SetQuests(std::vector<QuestEntry> a_quests)
 	{
 		std::lock_guard lk(g_lock);
+		const std::uint32_t selected = (!g_quests.empty() && g_state.questScroll < int(g_quests.size())) ?
+		                                   g_quests[g_state.questScroll].formID :
+		                                   0;
 		g_quests = std::move(a_quests);
+		for (int i = 0; selected && i < int(g_quests.size()); ++i) {
+			if (g_quests[i].formID == selected) {
+				g_state.questScroll = i;
+				break;
+			}
+		}
 		g_questsLoaded = true;
 		if (g_state.questScroll >= int(g_quests.size())) {
 			g_state.questScroll = std::max(0, int(g_quests.size()) - 1);

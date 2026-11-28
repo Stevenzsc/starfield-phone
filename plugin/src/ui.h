@@ -39,6 +39,7 @@ namespace Ui
 		kNone,
 		kOpenPhotoMode,    // camera app: put the phone away, then open the game's photo mode
 		kSettingsChanged,  // save GetSettings() to the ini
+		kToggleTrack,      // Quests page: track / untrack SelectedQuest()
 	};
 	Action Input(Key a_key);  // from the game's task thread while the phone is open
 	void   OnOpen();          // phone taken out: back to the home screen
@@ -61,7 +62,11 @@ namespace Ui
 		std::string              name;
 		std::string              group;       // quest type shown as a section header ("主线", "派系", ...)
 		std::vector<std::string> objectives;  // in-progress, displayed objectives
+		std::uint32_t            formID = 0;
+		bool                     tracked = false;  // Quest.IsActive: shown in the HUD / compass
 	};
+	// the quest under the selection on the Quests page (formID 0 if none)
+	QuestEntry SelectedQuest();
 	bool WantsQuests();                                 // the Quests page is open: feed it with SetQuests
 	void SetQuests(std::vector<QuestEntry> a_quests);  // from the game's task thread
 
