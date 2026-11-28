@@ -689,6 +689,124 @@ namespace
 		bone.haveWritten = true;
 	}
 
+	// ---- the skeleton's pose arrays ----
+	// FUN_142BE93F0 (the writer of the bones' world transforms) does not read the NiNode locals: it works on the
+	// pose component at node +0x180 of a skeleton node, whose +0x10 block holds arrays of 0x40-byte transforms
+	// (+0x08 -> +0x10: locals, +0x10 -> +0x10: model space; u16 bone count at component +0x78). The NiNode locals are
+	// copies (FUN_141A3DC50). So the offsets go into the local array: the component is found by walking up from
+	// the clavicle, the bones' indices by matching their NiNode locals against the array entries.
+	bool SafeCopy(const void* a_src, void* a_dst, std::size_t a_size)
+	{
+		__try {
+			std::memcpy(a_dst, a_src, a_size);
+			return true;
+		} __except (1) {
+			return false;
+		}
+	}
+
+	std::uintptr_t ReadPtr(std::uintptr_t a_addr)
+	{
+		std::uintptr_t v = 0;
+		return (a_addr > 0x10000 && SafeCopy(reinterpret_cast<const void*>(a_addr), &v, sizeof(v))) ? v : 0;
+	}
+
+	struct PoseRef
+	{
+		std::uintptr_t component = 0;
+		std::uintptr_t locals = 0;  // array of 0x40-byte transforms
+		std::uint16_t  count = 0;
+		int            index[kBones] = { -1, -1, -1, -1 };
+		bool           searched = false;
+		bool           ok = false;
+	} g_pose;
+
+	float EntryDiff(std::uintptr_t a_entry, const RE::NiTransform& a_local)
+	{
+		float e[16];
+		if (!SafeCopy(reinterpret_cast<const void*>(a_entry), e, sizeof(e))) {
+			return 1e9F;
+		}
+		const float* l = reinterpret_cast<const float*>(&a_local);
+		float        d = 0;
+		for (int k = 0; k < 15; ++k) {  // rotation rows (with padding), translation; not the scale slot
+			d += std::abs(e[k] - l[k]);
+		}
+		return d;
+	}
+
+	// (g_armLock held) find the pose component and our bones' indices once per arm chain
+	void FindPose()
+	{
+		if (g_pose.searched || !g_arm.bones[0].node) {
+			return;
+		}
+		g_pose = {};
+		g_pose.searched = true;
+		int depth = 0;
+		for (auto* n = g_arm.bones[0].node->parent; n && depth < 16; n = n->parent, ++depth) {
+			const auto comp = ReadPtr(reinterpret_cast<std::uintptr_t>(n) + 0x180);
+			if (!comp) {
+				continue;
+			}
+			const auto    block = ReadPtr(comp + 0x10);
+			const auto    locals = block ? ReadPtr(ReadPtr(block + 0x08) + 0x10) : 0;
+			std::uint16_t count = 0;
+			SafeCopy(reinterpret_cast<const void*>(comp + 0x78), &count, sizeof(count));
+			REX::INFO("arm: pose candidate on '{}' (depth {}): component {:X} block {:X} locals {:X} count {}", NameOf(n), depth, comp,
+				block, locals, count);
+			if (!locals || count < 8 || count > 1024) {
+				continue;
+			}
+			bool all = true;
+			for (int b = 0; b < kBones; ++b) {
+				float best = 1e9F;
+				int   bestI = -1;
+				for (int i = 0; i < count; ++i) {
+					const float d = EntryDiff(locals + std::uintptr_t(i) * 0x40, g_arm.bones[b].animLocal);  // the animation's value, before our offset
+					if (d < best) best = d, bestI = i;
+				}
+				REX::INFO("arm: {} -> pose index {} (difference {:.5f})", NameOf(g_arm.bones[b].node), bestI, best);
+				if (best < 0.01F) {
+					g_pose.index[b] = bestI;
+				} else {
+					all = false;
+				}
+			}
+			if (all) {
+				g_pose.component = comp;
+				g_pose.locals = locals;
+				g_pose.count = count;
+				g_pose.ok = true;
+				REX::INFO("arm: posing through the local pose array of '{}'", NameOf(n));
+				return;
+			}
+		}
+		REX::WARN("arm: no pose array matched the arm bones");
+	}
+
+	// (g_armLock held) multiply the offsets into the pose array entries (re-read every frame: the animation refills it)
+	void ApplyPoseOffsets(float a_w)
+	{
+		if (!g_pose.ok || a_w <= 0.0F) {
+			return;
+		}
+		// the array may move when the skeleton is rebuilt: re-resolve it from the component
+		const auto block = ReadPtr(g_pose.component + 0x10);
+		const auto locals = block ? ReadPtr(ReadPtr(block + 0x08) + 0x10) : 0;
+		if (locals != g_pose.locals) {
+			g_pose = {};  // search again next time
+			return;
+		}
+		for (int b = 0; b < kBones; ++b) {
+			auto* e = reinterpret_cast<RE::NiTransform*>(locals + std::uintptr_t(g_pose.index[b]) * 0x40);
+			Xf    off;
+			off.rot = g_boneRot[b];
+			const Mat d = a_w >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, a_w).rot;
+			SetMat(e->rotate, Mul(MatOf(*e), d));
+		}
+	}
+
 	// ---- the reliable point: the player's 1st-person 3D update ----
 	// A hardware-watchpoint trace (bonetrace.cpp) showed the animation job writing the bones' locals and the
 	// player's 3D update FUN_141A3D8C0 (ID 102725) computing their world transforms through
@@ -705,10 +823,13 @@ namespace
 	{
 		if (a_first) {
 			++g_update3DCalls;
-			for (int b = 0; b < kBones; ++b) {
-				if (g_hookBones[b].load()) {
-					ApplyBoneOffset(b);
+			if (g_hookBones[0].load()) {
+				for (int b = 0; b < kBones; ++b) {
+					ApplyBoneOffset(b);  // NiNode locals (copies) for anything that reads them
 				}
+				std::lock_guard lk(g_armLock);
+				FindPose();
+				ApplyPoseOffsets(g_armWeight.load());
 			}
 		}
 		g_update3DOrig(a_actor, a_dt, a_root, a_camera, a_first, a_flag, a_p7);
@@ -751,6 +872,7 @@ namespace
 		}
 		std::lock_guard lk(g_armLock);
 		g_arm = {};
+		g_pose = {};
 	}
 
 	// numpad on a bone: rotate about the bone's own axes (pairs: 8/2 4/6 7/9 and 1/3 / * - +)
