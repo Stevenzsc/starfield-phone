@@ -59,6 +59,7 @@ namespace Ui
 	struct QuestEntry
 	{
 		std::string              name;
+		std::string              group;       // quest type shown as a section header ("主线", "派系", ...)
 		std::vector<std::string> objectives;  // in-progress, displayed objectives
 	};
 	bool WantsQuests();                                 // the Quests page is open: feed it with SetQuests

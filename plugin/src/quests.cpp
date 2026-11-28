@@ -22,8 +22,40 @@ namespace
 	constexpr std::ptrdiff_t kObjArray = 0x150;
 	constexpr std::ptrdiff_t kObjState = 0x28;
 	constexpr int            kStateDisplayed = 1;
-	constexpr std::ptrdiff_t kDnamType = 0x110;      // DNAM bytes 8-11 (quest type?)
-	constexpr std::ptrdiff_t kDnamPriority = 0x118;  // DNAM byte 4 (priority?)
+	constexpr std::ptrdiff_t kDnamPriority = 0x118;  // DNAM byte 4 = priority (verified: MQ402 90, misc 30-50)
+	// QTYP (loader writes param_1[0x24]): the quest-type keyword; a form ID at load, a KYWD pointer once resolved
+	constexpr std::ptrdiff_t kQuestTypeKeyword = 0x120;
+
+	struct QuestType
+	{
+		std::uint32_t keyword;  // Starfield.esm KYWD
+		int           rank;     // mission menu order
+		const char*   label;
+	};
+	constexpr QuestType kQuestTypes[] = {
+		{ 0x000475FA, 0, "主线" },      // QuestTypeMainQuest
+		{ 0x000475FD, 1, "派系" },      // QuestTypeFactions
+		{ 0x00047600, 2, "支线" },      // QuestTypeSideQuest
+		{ 0x001E2D30, 3, "任务板" },    // QuestTypeMission
+		{ 0x000475F8, 4, "活动" },      // QuestTypeActivities
+	};
+
+	const QuestType* TypeOf(const RE::TESForm* a_quest)
+	{
+		const auto raw = Read<std::uintptr_t>(a_quest, kQuestTypeKeyword);
+		std::uint32_t id = 0;
+		if (raw > 0xFFFFFFFFull) {
+			id = reinterpret_cast<const RE::TESForm*>(raw)->GetFormID();
+		} else {
+			id = static_cast<std::uint32_t>(raw);
+		}
+		for (const auto& t : kQuestTypes) {
+			if (t.keyword == id) {
+				return &t;
+			}
+		}
+		return nullptr;
+	}
 
 	template <class T>
 	T Read(const void* a_base, std::ptrdiff_t a_off)
@@ -122,7 +154,7 @@ namespace Quests
 		}
 		struct Keyed
 		{
-			std::uint32_t      type;
+			int                type;  // rank in the mission menu (unknown types last)
 			std::uint8_t       priority;
 			const RE::TESForm* form;
 			Ui::QuestEntry     entry;
@@ -153,16 +185,20 @@ namespace Quests
 			if (entry.name.empty()) {
 				entry.name = q->GetFormEditorID() ? q->GetFormEditorID() : "?";
 			}
-			keyed.push_back({ Read<std::uint32_t>(q, kDnamType), Read<std::uint8_t>(q, kDnamPriority), q, std::move(entry) });
+			const auto* type = TypeOf(q);
+			entry.group = type ? type->label : "其他";
+			keyed.push_back({ type ? type->rank : 99, Read<std::uint8_t>(q, kDnamPriority), q, std::move(entry) });
 		}
-		// quest type ascending, then priority descending (to be confirmed in game: see the log below)
+		// like the game's mission menu: main, factions, side, missions, activities, others; then priority
 		std::stable_sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) {
-			return a.type != b.type ? a.type < b.type : a.priority > b.priority;
+			if (a.type != b.type) return a.type < b.type;
+			if (a.priority != b.priority) return a.priority > b.priority;
+			return a.entry.name < b.entry.name;
 		});
 		static bool logged = false;
 		for (auto& k : keyed) {
 			if (!logged) {
-				REX::INFO("quests: type {} priority {} {:08X} '{}' = '{}'", k.type, k.priority, k.form->GetFormID(),
+				REX::INFO("quests: rank {} priority {} {:08X} '{}' = '{}'", k.type, k.priority, k.form->GetFormID(),
 					k.form->GetFormEditorID() ? k.form->GetFormEditorID() : "", k.entry.name);
 			}
 			if (result.size() < a_maxQuests) {

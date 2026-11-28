@@ -470,6 +470,14 @@ namespace
 		int       shown = 0;
 		for (int i = first; i < int(g_quests.size()); ++i) {
 			const auto& q = g_quests[i];
+			// section header at the top of the page and wherever the quest type changes
+			if (!q.group.empty() && (i == first || q.group != g_quests[i - 1].group)) {
+				if (shown > 0 && y + int(objF * 1.6f) + int(nameF * 1.3f) > bottom) {
+					break;
+				}
+				Text(c, pad, y, q.group.c_str(), objF * 0.9f, { 150, 200, 255 }, 0.95f);
+				y += int(objF * 1.5f);
+			}
 			const auto  nameLines = Wrap(q.name, nameF, c.w - 2 * pad);
 			if (shown > 0 && y + int(nameF * 1.3f) * int(nameLines.size()) > bottom) {
 				break;
