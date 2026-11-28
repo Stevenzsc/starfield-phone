@@ -1,4 +1,5 @@
-// Phone home screen (P1): status bar, big clock with the in-game date, and an app grid.
+// Phone UI in the game's menu style: dark panels, thin rules, white selection, the four-colour stripe and button
+// prompts. Status bar, home (clock, date, app tiles) and the app pages.
 // Rendered on the CPU with stb_truetype into a cached canvas; the canvas is rebuilt only when the shown minute or
 // the orientation changes, and copied into the screen texture on every write.
 //
@@ -23,6 +24,8 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -50,34 +53,68 @@ namespace
 		std::uint8_t r, g, b;
 	};
 
-	// ---- font ----
-	std::vector<unsigned char> g_fontData;
-	stbtt_fontinfo             g_font{};
-	bool                       g_fontOk = false;
-
-	bool LoadFont()
+	// ---- fonts ----
+	// Latin text and digits use Bahnschrift (DIN-like, close to the game's UI font), app icons use the Segoe Fluent /
+	// MDL2 icon font, everything else (CJK) uses a Chinese system font. All are loaded from the user's Windows fonts.
+	struct Face
 	{
-		// first that loads wins; .ttc files hold several faces, face 0 is the regular one
-		const char* candidates[] = {
-			"C:\\Windows\\Fonts\\msyh.ttc",    // Microsoft YaHei
-			"C:\\Windows\\Fonts\\simhei.ttf",  // SimHei
-			"C:\\Windows\\Fonts\\simsun.ttc",  // SimSun
-			"C:\\Windows\\Fonts\\segoeui.ttf", // no CJK, last resort
-		};
-		for (const char* path : candidates) {
+		std::vector<unsigned char> data;
+		stbtt_fontinfo             info{};
+		bool                       ok = false;
+	};
+	Face g_cjk, g_latin, g_icons;
+	bool g_fontOk = false;
+
+	bool LoadFace(Face& a_face, std::initializer_list<const char*> a_paths, const char* a_what)
+	{
+		for (const char* path : a_paths) {
 			std::ifstream in(path, std::ios::binary);
 			if (!in) {
 				continue;
 			}
-			g_fontData.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-			const int offset = stbtt_GetFontOffsetForIndex(g_fontData.data(), 0);
-			if (offset >= 0 && stbtt_InitFont(&g_font, g_fontData.data(), offset)) {
-				Log("ui: font %s (%zu bytes)", path, g_fontData.size());
+			a_face.data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+			const int offset = stbtt_GetFontOffsetForIndex(a_face.data.data(), 0);
+			if (offset >= 0 && stbtt_InitFont(&a_face.info, a_face.data.data(), offset)) {
+				a_face.ok = true;
+				Log("ui: %s font %s (%zu bytes)", a_what, path, a_face.data.size());
 				return true;
 			}
 		}
-		Log("ui: no usable font found; home screen disabled");
+		Log("ui: no %s font found", a_what);
 		return false;
+	}
+
+	bool LoadFont()
+	{
+		// .ttc files hold several faces, face 0 is the regular one
+		LoadFace(g_latin, { "C:\\Windows\\Fonts\\bahnschrift.ttf", "C:\\Windows\\Fonts\\segoeui.ttf" }, "latin");
+		LoadFace(g_icons, { "C:\\Windows\\Fonts\\SegoeIcons.ttf", "C:\\Windows\\Fonts\\segmdl2.ttf" }, "icon");
+		return LoadFace(g_cjk,
+			{ "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\simsun.ttc",
+				"C:\\Windows\\Fonts\\segoeui.ttf" },
+			"text");
+	}
+
+	// face and glyph for a code point: icons (private use area) -> latin (below U+2000) -> CJK
+	const Face& FaceFor(int a_cp, int& a_glyph)
+	{
+		if (a_cp >= 0xE000 && a_cp <= 0xF8FF && g_icons.ok) {
+			if ((a_glyph = stbtt_FindGlyphIndex(&g_icons.info, a_cp)) != 0) {
+				return g_icons;
+			}
+		}
+		if (a_cp < 0x2000 && g_latin.ok) {
+			if ((a_glyph = stbtt_FindGlyphIndex(&g_latin.info, a_cp)) != 0) {
+				return g_latin;
+			}
+		}
+		a_glyph = stbtt_FindGlyphIndex(&g_cjk.info, a_cp);
+		return g_cjk;
+	}
+
+	bool HasIcon(int a_cp)
+	{
+		return g_icons.ok && stbtt_FindGlyphIndex(&g_icons.info, a_cp) != 0;
 	}
 
 	// UTF-8 -> code points
@@ -138,28 +175,68 @@ namespace
 		return { std::uint8_t(a.r + (b.r - a.r) * t), std::uint8_t(a.g + (b.g - a.g) * t), std::uint8_t(a.b + (b.b - a.b) * t) };
 	}
 
+	// ---- palette (Starfield menus: near-black panels, off-white text, white selection, the four-colour stripe) ----
+	constexpr Rgb kBgTop{ 11, 14, 19 };
+	constexpr Rgb kBgBottom{ 20, 25, 32 };
+	constexpr Rgb kPanel{ 30, 36, 45 };
+	constexpr Rgb kLine{ 78, 88, 100 };
+	constexpr Rgb kText{ 236, 236, 230 };
+	constexpr Rgb kDim{ 150, 158, 168 };
+	constexpr Rgb kSelBg{ 236, 236, 230 };
+	constexpr Rgb kSelText{ 14, 17, 22 };
+	constexpr Rgb kStripe[4] = { { 214, 66, 44 }, { 234, 139, 44 }, { 243, 198, 62 }, { 48, 128, 194 } };
+	constexpr Rgb kWarn{ 214, 66, 44 };
+	constexpr Rgb kGold{ 243, 198, 62 };
+
 	void FillBackground(Canvas& c)
 	{
-		const Rgb top{ 10, 18, 38 }, bottom{ 34, 46, 82 };
 		for (int y = 0; y < c.h; ++y) {
-			const Rgb row = Mix(top, bottom, float(y) / float(c.h - 1));
+			Rgb row = Mix(kBgTop, kBgBottom, float(y) / float(c.h - 1));
+			if (y % 4 == 0) {  // faint scan lines
+				row = Mix(row, kText, 0.025f);
+			}
 			for (int x = 0; x < c.w; ++x) {
 				auto* p = &c.px[(std::size_t(y) * c.w + x) * 4];
 				p[0] = row.r, p[1] = row.g, p[2] = row.b, p[3] = 255;
 			}
 		}
-		// a few fixed "stars"
-		std::uint32_t seed = 1234567;
-		for (int i = 0; i < 90; ++i) {
-			seed = seed * 1103515245 + 12345;
-			const int x = int((seed >> 8) % std::uint32_t(c.w));
-			seed = seed * 1103515245 + 12345;
-			const int y = int((seed >> 8) % std::uint32_t(c.h));
-			c.Blend(x, y, { 255, 255, 255 }, 0.25f + float((seed >> 4) % 50) / 100.0f);
+	}
+
+	// sharp-cornered filled rectangle
+	void Rect(Canvas& c, int x0, int y0, int w, int h, Rgb col, float alpha = 1.0f)
+	{
+		for (int y = std::max(0, y0); y < std::min(c.h, y0 + h); ++y)
+			for (int x = std::max(0, x0); x < std::min(c.w, x0 + w); ++x)
+				c.Blend(x, y, col, alpha);
+	}
+
+	// rectangle outline of thickness t
+	void Frame(Canvas& c, int x0, int y0, int w, int h, int t, Rgb col, float alpha = 1.0f)
+	{
+		Rect(c, x0, y0, w, t, col, alpha);
+		Rect(c, x0, y0 + h - t, w, t, col, alpha);
+		Rect(c, x0, y0 + t, t, h - 2 * t, col, alpha);
+		Rect(c, x0 + w - t, y0 + t, t, h - 2 * t, col, alpha);
+	}
+
+	// four short corner brackets (viewfinder / photo frame)
+	void Brackets(Canvas& c, int x0, int y0, int w, int h, int len, int t, Rgb col)
+	{
+		Rect(c, x0, y0, len, t, col), Rect(c, x0, y0, t, len, col);
+		Rect(c, x0 + w - len, y0, len, t, col), Rect(c, x0 + w - t, y0, t, len, col);
+		Rect(c, x0, y0 + h - t, len, t, col), Rect(c, x0, y0 + h - len, t, len, col);
+		Rect(c, x0 + w - len, y0 + h - t, len, t, col), Rect(c, x0 + w - t, y0 + h - len, t, len, col);
+	}
+
+	// the game's four-colour stripe badge: four vertical bars of width a_bw, gap a_gap
+	void Stripes(Canvas& c, int x0, int y0, int a_bw, int h, int a_gap)
+	{
+		for (int i = 0; i < 4; ++i) {
+			Rect(c, x0 + i * (a_bw + a_gap), y0, a_bw, h, kStripe[i]);
 		}
 	}
 
-	// anti-aliased rounded rectangle
+	// anti-aliased rounded rectangle (circles for the shutter)
 	void RoundRect(Canvas& c, int x0, int y0, int w, int h, int r, Rgb top, Rgb bottom, float alpha = 1.0f)
 	{
 		for (int y = y0; y < y0 + h; ++y) {
@@ -177,39 +254,47 @@ namespace
 
 	int TextWidth(const char* a_utf8, float a_px)
 	{
-		const float scale = stbtt_ScaleForPixelHeight(&g_font, a_px);
-		const auto  cps = Decode(a_utf8);
-		float       x = 0;
+		const auto cps = Decode(a_utf8);
+		float      x = 0;
 		for (std::size_t i = 0; i < cps.size(); ++i) {
-			int adv = 0, lsb = 0;
-			stbtt_GetCodepointHMetrics(&g_font, cps[i], &adv, &lsb);
+			int         glyph = 0;
+			const Face& f = FaceFor(cps[i], glyph);
+			const float scale = stbtt_ScaleForPixelHeight(&f.info, a_px);
+			int         adv = 0, lsb = 0;
+			stbtt_GetGlyphHMetrics(&f.info, glyph, &adv, &lsb);
 			x += adv * scale;
 			if (i + 1 < cps.size()) {
-				x += scale * stbtt_GetCodepointKernAdvance(&g_font, cps[i], cps[i + 1]);
+				int         g2 = 0;
+				const Face& f2 = FaceFor(cps[i + 1], g2);
+				if (&f2 == &f) {
+					x += scale * stbtt_GetGlyphKernAdvance(&f.info, glyph, g2);
+				}
 			}
 		}
 		return int(std::ceil(x));
 	}
 
-	// a_y = top of the text line
+	// a_y = top of the text line; the baseline comes from the CJK face so mixed text lines up
 	void Text(Canvas& c, int a_x, int a_y, const char* a_utf8, float a_px, Rgb a_color, float a_alpha = 1.0f)
 	{
-		const float scale = stbtt_ScaleForPixelHeight(&g_font, a_px);
-		int         ascent = 0, descent = 0, gap = 0;
-		stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
-		const int baseline = a_y + int(std::round(ascent * scale));
+		int ascent = 0, descent = 0, gap = 0;
+		stbtt_GetFontVMetrics(&g_cjk.info, &ascent, &descent, &gap);
+		const int  baseline = a_y + int(std::round(ascent * stbtt_ScaleForPixelHeight(&g_cjk.info, a_px)));
 		const auto cps = Decode(a_utf8);
 		float      x = float(a_x);
 		std::vector<unsigned char> bmp;
 		for (std::size_t i = 0; i < cps.size(); ++i) {
-			int adv = 0, lsb = 0;
-			stbtt_GetCodepointHMetrics(&g_font, cps[i], &adv, &lsb);
+			int         glyph = 0;
+			const Face& f = FaceFor(cps[i], glyph);
+			const float scale = stbtt_ScaleForPixelHeight(&f.info, a_px);
+			int         adv = 0, lsb = 0;
+			stbtt_GetGlyphHMetrics(&f.info, glyph, &adv, &lsb);
 			int bx0, by0, bx1, by1;
-			stbtt_GetCodepointBitmapBox(&g_font, cps[i], scale, scale, &bx0, &by0, &bx1, &by1);
+			stbtt_GetGlyphBitmapBox(&f.info, glyph, scale, scale, &bx0, &by0, &bx1, &by1);
 			const int gw = bx1 - bx0, gh = by1 - by0;
 			if (gw > 0 && gh > 0) {
 				bmp.assign(std::size_t(gw) * gh, 0);
-				stbtt_MakeCodepointBitmap(&g_font, bmp.data(), gw, gh, gw, scale, scale, cps[i]);
+				stbtt_MakeGlyphBitmap(&f.info, bmp.data(), gw, gh, gw, scale, scale, glyph);
 				const int ox = int(std::round(x)) + bx0, oy = baseline + by0;
 				for (int yy = 0; yy < gh; ++yy)
 					for (int xx = 0; xx < gw; ++xx)
@@ -217,9 +302,35 @@ namespace
 			}
 			x += adv * scale;
 			if (i + 1 < cps.size()) {
-				x += scale * stbtt_GetCodepointKernAdvance(&g_font, cps[i], cps[i + 1]);
+				int         g2 = 0;
+				const Face& f2 = FaceFor(cps[i + 1], g2);
+				if (&f2 == &f) {
+					x += scale * stbtt_GetGlyphKernAdvance(&f.info, glyph, g2);
+				}
 			}
 		}
+	}
+
+	// one icon glyph centred on (a_cx, a_cy) by its own bitmap box
+	void Icon(Canvas& c, int a_cx, int a_cy, int a_cp, float a_px, Rgb a_color)
+	{
+		const int glyph = stbtt_FindGlyphIndex(&g_icons.info, a_cp);
+		if (!g_icons.ok || !glyph) {
+			return;
+		}
+		const float scale = stbtt_ScaleForPixelHeight(&g_icons.info, a_px);
+		int         bx0, by0, bx1, by1;
+		stbtt_GetGlyphBitmapBox(&g_icons.info, glyph, scale, scale, &bx0, &by0, &bx1, &by1);
+		const int gw = bx1 - bx0, gh = by1 - by0;
+		if (gw <= 0 || gh <= 0) {
+			return;
+		}
+		std::vector<unsigned char> bmp(std::size_t(gw) * gh, 0);
+		stbtt_MakeGlyphBitmap(&g_icons.info, bmp.data(), gw, gh, gw, scale, scale, glyph);
+		const int ox = a_cx - gw / 2, oy = a_cy - gh / 2;
+		for (int yy = 0; yy < gh; ++yy)
+			for (int xx = 0; xx < gw; ++xx)
+				c.Blend(ox + xx, oy + yy, a_color, bmp[std::size_t(yy) * gw + xx] / 255.0f);
 	}
 
 	std::vector<std::string> Wrap(const std::string& a_utf8, float a_px, int a_maxW)
@@ -254,18 +365,18 @@ namespace
 	struct App
 	{
 		const char* label;
-		const char* glyph;
-		Rgb         top, bottom;
+		const char* glyph;  // fallback when the icon font is missing
+		int         icon;   // Segoe Fluent / MDL2 code point
 	};
 	constexpr App kApps[] = {
-		{ "联系人", "人", { 76, 217, 100 }, { 40, 160, 70 } },
-		{ "任务", "务", { 255, 159, 10 }, { 220, 110, 0 } },
-		{ "星图", "星", { 64, 156, 255 }, { 20, 100, 220 } },
-		{ "前哨站", "哨", { 48, 200, 200 }, { 10, 140, 150 } },
-		{ "飞船", "船", { 175, 82, 222 }, { 120, 50, 180 } },
-		{ "相机", "相", { 142, 142, 147 }, { 90, 90, 98 } },
-		{ "相册", "册", { 255, 69, 120 }, { 210, 30, 80 } },
-		{ "设置", "设", { 100, 116, 139 }, { 60, 72, 92 } },
+		{ "联系人", "人", 0xE77B },  // Contact
+		{ "任务", "务", 0xE7C1 },    // Flag
+		{ "星图", "星", 0xE774 },    // Globe
+		{ "前哨站", "哨", 0xE80F },  // Home
+		{ "飞船", "船", 0xE709 },    // Airplane
+		{ "相机", "相", 0xE722 },    // Camera
+		{ "相册", "册", 0xE8B9 },    // Picture
+		{ "设置", "设", 0xE713 },    // Settings
 	};
 
 	struct State
@@ -354,124 +465,188 @@ namespace
 	int                       g_galImgW = 0, g_galImgH = 0, g_galImgMaxW = 0, g_galImgMaxH = 0;
 	bool                      g_galLoading = false;
 
-	void DrawHome(Canvas& c, const State& s)
+	// ---- shared chrome ----
+	int Pad(const Canvas& c) { return int(c.w * 0.05f); }
+
+	void ClockText(const State& s, char (&a_out)[16])
 	{
-		const Rgb white{ 255, 255, 255 };
 		const int hh = int(s.hour) % 24;
 		const int mm = int((s.hour - std::floor(s.hour)) * 60.0f) % 60;
-		char      clock[16];
-		std::snprintf(clock, sizeof(clock), "%02d:%02d", hh, mm);
+		std::snprintf(a_out, sizeof(a_out), "%02d:%02d", hh, mm);
+	}
 
-		// everything scales with the canvas (its aspect follows the physical screen, see screen_aspect)
-		const float H = float(c.h), W = float(c.w);
-		const int   pad = int(W * 0.045f);
+	// status bar: time left, network + signal + battery right, thin rule below; returns the y under it
+	int StatusBar(Canvas& c, const State& s)
+	{
+		const float H = float(c.h);
+		const int   pad = Pad(c);
+		const float f = std::max(14.0f, H * 0.04f);
+		const int   y = int(H * 0.018f);
+		char        clock[16];
+		ClockText(s, clock);
+		Text(c, pad, y, clock, f, kText);
 
-		// status bar: time left, network + battery right
-		const float sbFont = std::max(16.0f, H * 0.045f);
-		const int   sbY = int(H * 0.018f);
-		Text(c, pad, sbY, clock, sbFont, white);
-		const int batH = int(sbFont * 0.7f), batW = int(batH * 2.2f);
-		const int batX = c.w - pad - batW - 4, batY = sbY + int(sbFont * 0.2f);
-		RoundRect(c, batX, batY, batW, batH, 4, { 230, 230, 230 }, { 200, 200, 200 });
-		RoundRect(c, batX + 3, batY + 3, batW - 6, batH - 6, 2, { 52, 199, 89 }, { 40, 170, 75 });
-		RoundRect(c, batX + batW, batY + batH / 4, 4, batH / 2, 1, { 230, 230, 230 }, { 230, 230, 230 });
-		const int barsX = batX - int(sbFont * 2.0f);
-		for (int i = 0; i < 4; ++i) {  // signal bars
-			const int bh = int(batH * (0.35f + 0.22f * i));
-			RoundRect(c, barsX + i * int(sbFont * 0.35f), batY + batH - bh, std::max(3, int(sbFont * 0.2f)), bh, 1, white, white);
+		const int bh = int(f * 0.62f), bw = int(bh * 2.1f);
+		const int bx = c.w - pad - bw - 3, by = y + int(f * 0.22f);
+		Frame(c, bx, by, bw, bh, 2, kText);
+		Rect(c, bx + 4, by + 4, int((bw - 8) * 0.8f), bh - 8, kText);
+		Rect(c, bx + bw, by + bh / 4, 3, bh / 2, kText);
+		const int sx = bx - int(f * 1.7f);
+		for (int i = 0; i < 4; ++i) {
+			const int h = int(bh * (0.3f + 0.233f * i));
+			Rect(c, sx + i * int(f * 0.3f), by + bh - h, std::max(2, int(f * 0.17f)), h, kText);
 		}
 		const char* net = "星联";
-		Text(c, barsX - TextWidth(net, sbFont * 0.85f) - int(sbFont * 0.4f), sbY + int(sbFont * 0.08f), net, sbFont * 0.85f, white, 0.9f);
+		Text(c, sx - TextWidth(net, f * 0.85f) - int(f * 0.45f), y + int(f * 0.06f), net, f * 0.85f, kDim);
+		const int line = y + int(f * 1.45f);
+		Rect(c, pad, line, c.w - 2 * pad, 1, kLine);
+		return line + 1;
+	}
 
-		// big clock + date
-		const float clockFont = std::min(H * 0.2f, W * 0.3f);
-		const int   clockY = int(H * 0.1f);
-		TextCentered(c, c.w / 2, clockY, clock, clockFont, white);
+	// page title with the stripe badge and a rule; optional right-aligned note; returns where content starts
+	int Header(Canvas& c, int a_y, const char* a_title, const char* a_note = nullptr)
+	{
+		const float H = float(c.h);
+		const int   pad = Pad(c);
+		const float tf = std::max(18.0f, H * 0.062f);
+		const int   y = a_y + int(H * 0.03f);
+		const int   bw = std::max(3, int(H * 0.009f)), gap = std::max(2, bw / 2);
+		Stripes(c, pad, y + int(tf * 0.18f), bw, int(tf * 0.95f), gap);
+		Text(c, pad + 4 * (bw + gap) + int(tf * 0.35f), y, a_title, tf, kText);
+		if (a_note) {
+			const float nf = tf * 0.55f;
+			Text(c, c.w - pad - TextWidth(a_note, nf), y + int(tf * 0.42f), a_note, nf, kDim);
+		}
+		const int line = y + int(tf * 1.45f);
+		Rect(c, pad, line, c.w - 2 * pad, 1, kLine);
+		return line + int(H * 0.025f);
+	}
+
+	struct Prompt
+	{
+		const char* key;
+		const char* label;
+	};
+
+	// button prompts along the bottom, right-aligned like the game's ([Enter] Select); returns the bar's top y
+	int Prompts(Canvas& c, std::initializer_list<Prompt> a_items)
+	{
+		const float H = float(c.h);
+		const int   pad = Pad(c);
+		const float f = std::max(12.0f, H * 0.034f);
+		const int   barH = int(H * 0.08f);
+		const int   top = c.h - barH;
+		Rect(c, pad, top, c.w - 2 * pad, 1, kLine);
+		const int boxH = int(f * 1.45f);
+		const int by = top + (barH - boxH) / 2;
+		int       x = c.w - pad;
+		for (auto it = std::rbegin(a_items); it != std::rend(a_items); ++it) {
+			const int lw = TextWidth(it->label, f);
+			x -= lw;
+			Text(c, x, by + int(f * 0.2f), it->label, f, kText);
+			const int kw = TextWidth(it->key, f * 0.85f) + int(f * 0.8f);
+			x -= kw + int(f * 0.4f);
+			Frame(c, x, by, kw, boxH, 2, kText, 0.9f);
+			Text(c, x + int(f * 0.4f), by + int(f * 0.28f), it->key, f * 0.85f, kText);
+			x -= int(f * 1.1f);
+		}
+		return top;
+	}
+
+	void DrawHome(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const int   bottom = Prompts(c, { { "←→", "选择" }, { "Enter", "打开" } });
+
+		// big clock, date, stripe badge
+		char clock[16];
+		ClockText(s, clock);
+		const float clockF = std::min(H * 0.17f, W * 0.24f);
+		const int   cy = a_y + int(H * 0.02f);
+		Text(c, pad, cy, clock, clockF, kText);
+		const int bw = std::max(4, int(H * 0.014f)), gap = std::max(2, bw / 2);
+		Stripes(c, c.w - pad - 4 * bw - 3 * gap, cy + int(clockF * 0.28f), bw, int(clockF * 0.72f), gap);
 		char date[64];
 		std::snprintf(date, sizeof(date), "%u年%u月%u日", s.year, s.month + 1, s.day);
-		TextCentered(c, c.w / 2, clockY + int(clockFont * 1.05f), date, std::max(14.0f, H * 0.05f), { 210, 220, 240 });
+		const float dateF = std::max(13.0f, H * 0.042f);
+		const int   dy = cy + int(clockF * 1.08f);
+		Text(c, pad, dy, date, dateF, kDim);
+		const int rule = dy + int(dateF * 1.6f);
+		Rect(c, pad, rule, c.w - 2 * pad, 1, kLine);
 
-		// app grid (lower part)
+		// app tiles: 4 x 2, sharp corners; the selection is filled white with dark content
 		const int   cols = W > H * 1.3f ? 8 : 4;
 		const int   rows = int((std::size(kApps) + cols - 1) / cols);
-		const int   cellW = (c.w - 2 * pad) / cols;
-		const float labelFont = std::max(12.0f, H * 0.04f);
-		const int   icon = int(std::min(cellW * 0.72f, H * 0.15f));
-		const int   cellH = icon + int(labelFont * 1.7f);
-		const int   gridY = c.h - rows * cellH - int(H * 0.06f);
+		const float labelF = std::max(11.0f, H * 0.034f);
+		const int   labelH = int(labelF * 1.7f);
+		const int   gapX = int(W * 0.025f), gapY = int(H * 0.02f);
+		const int   gridTop = rule + int(H * 0.03f);
+		const int   byWidth = (c.w - 2 * pad - (cols - 1) * gapX) / cols;
+		const int   byHeight = (bottom - gridTop - int(H * 0.02f) - rows * labelH - (rows - 1) * gapY) / rows;
+		const int   tile = std::max(16, std::min(byWidth, byHeight));
+		const int   gridW = cols * tile + (cols - 1) * gapX;
+		const int   gx = (c.w - gridW) / 2;
 		for (std::size_t i = 0; i < std::size(kApps); ++i) {
 			const auto& a = kApps[i];
 			const int   col = int(i) % cols, row = int(i) / cols;
-			const int   cx = pad + col * cellW + cellW / 2;
-			const int   y = gridY + row * cellH;
-			if (int(i) == s.homeSel) {  // selection ring
-				const int ring = std::max(4, icon / 12);
-				RoundRect(c, cx - icon / 2 - ring, y - ring, icon + 2 * ring, icon + 2 * ring, icon / 4 + ring, white, white, 0.55f);
+			const int   x = gx + col * (tile + gapX);
+			const int   y = gridTop + row * (tile + labelH + gapY);
+			const bool  sel = int(i) == s.homeSel;
+			if (sel) {
+				Rect(c, x, y, tile, tile, kSelBg);
+			} else {
+				Rect(c, x, y, tile, tile, kPanel, 0.9f);
+				Frame(c, x, y, tile, tile, 1, kLine);
 			}
-			RoundRect(c, cx - icon / 2, y, icon, icon, icon / 4, a.top, a.bottom);
-			TextCentered(c, cx, y + icon / 2 - int(icon * 0.27f), a.glyph, icon * 0.5f, white);
-			TextCentered(c, cx, y + icon + int(labelFont * 0.25f), a.label, labelFont, white, 0.95f);
+			const Rgb fg = sel ? kSelText : kText;
+			if (HasIcon(a.icon)) {
+				Icon(c, x + tile / 2, y + tile / 2, a.icon, tile * 0.42f, fg);
+			} else {
+				TextCentered(c, x + tile / 2, y + tile / 2 - int(tile * 0.24f), a.glyph, tile * 0.42f, fg);
+			}
+			TextCentered(c, x + tile / 2, y + tile + int(labelF * 0.3f), a.label, labelF, sel ? kText : kDim);
 		}
-
-		// home indicator
-		const int ind = int(W * 0.28f);
-		RoundRect(c, c.w / 2 - ind / 2, c.h - int(H * 0.03f) - 4, ind, std::max(4, int(H * 0.009f)), 3, white, white, 0.8f);
 	}
 
-	// header: back hint + title; returns the y where content starts
-	int DrawHeader(Canvas& c, const char* a_title, Rgb a_accent)
+	void DrawSettings(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h), W = float(c.w);
-		const int   pad = int(W * 0.045f);
-		const float f = std::max(16.0f, H * 0.045f);
-		Text(c, pad, int(H * 0.03f), "‹ 退格返回", f * 0.8f, { 200, 210, 230 }, 0.9f);
-		const float tf = std::max(20.0f, H * 0.075f);
-		const int   ty = int(H * 0.1f);
-		TextCentered(c, c.w / 2, ty, a_title, tf, { 255, 255, 255 });
-		RoundRect(c, c.w / 2 - int(W * 0.08f), ty + int(tf * 1.2f), int(W * 0.16f), std::max(3, int(H * 0.008f)), 2, a_accent, a_accent);
-		return ty + int(tf * 1.2f) + int(H * 0.05f);
-	}
-
-	void DrawHint(Canvas& c, const char* a_hint)
-	{
-		const float H = float(c.h);
-		TextCentered(c, c.w / 2, c.h - int(H * 0.09f), a_hint, std::max(12.0f, H * 0.036f), { 190, 200, 220 }, 0.85f);
-	}
-
-	void DrawSettings(Canvas& c, const State& s)
-	{
-		const float H = float(c.h), W = float(c.w);
-		int         y = DrawHeader(c, "设置", kApps[7].top);
-		const int   pad = int(W * 0.06f);
-		const int   rowH = int(H * 0.12f);
-		const float f = std::max(14.0f, H * 0.048f);
+		const int   pad = Pad(c);
+		Prompts(c, { { "↑↓", "选择" }, { "←→", "调整" }, { "退格", "返回" } });
+		int         y = Header(c, a_y, "设置");
+		const int   rowH = int(H * 0.095f);
+		const float f = std::max(13.0f, H * 0.044f);
 		char        bright[16];
 		std::snprintf(bright, sizeof(bright), "%d%%", s.brightness);
 		const char* labels[kSettingsRows] = { "屏幕亮度", "打开手机" };
 		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name };
 		for (int i = 0; i < kSettingsRows; ++i) {
 			const bool sel = i == s.setSel;
-			RoundRect(c, pad, y, c.w - 2 * pad, rowH - int(H * 0.02f), int(H * 0.025f), sel ? Rgb{ 90, 110, 150 } : Rgb{ 40, 52, 82 },
-				sel ? Rgb{ 70, 90, 130 } : Rgb{ 34, 44, 70 }, sel ? 0.95f : 0.8f);
-			const int ty = y + (rowH - int(H * 0.02f)) / 2 - int(f * 0.62f);
-			Text(c, pad + int(W * 0.05f), ty, labels[i], f, { 255, 255, 255 });
+			const int  ty = y + rowH / 2 - int(f * 0.62f);
+			if (sel) {
+				Rect(c, pad, y, c.w - 2 * pad, rowH - 2, kSelBg);
+			} else {
+				Rect(c, pad, y + rowH - 2, c.w - 2 * pad, 1, kLine, 0.7f);
+			}
+			const Rgb fg = sel ? kSelText : kText;
+			Text(c, pad + int(W * 0.03f), ty, labels[i], f, fg);
 			char val[40];
-			std::snprintf(val, sizeof(val), sel ? "‹ %s ›" : "%s", values[i]);
-			Text(c, c.w - pad - int(W * 0.05f) - TextWidth(val, f), ty, val, f, sel ? Rgb{ 255, 214, 10 } : Rgb{ 220, 230, 245 });
+			std::snprintf(val, sizeof(val), sel ? "‹  %s  ›" : "%s", values[i]);
+			Text(c, c.w - pad - int(W * 0.03f) - TextWidth(val, f), ty, val, f, sel ? kSelText : kDim);
 			y += rowH;
 		}
-		DrawHint(c, "↑↓ 选择   ←→ 调整");
 	}
 
-	// live viewfinder (frames from camera.cpp), shutter button, toast after a photo
-	void DrawCamera(Canvas& c, const State&)
+	// live viewfinder (frames from camera.cpp), shutter, toast after a photo
+	void DrawCamera(Canvas& c, const State&, int a_y)
 	{
 		const float H = float(c.h), W = float(c.w);
-		const float f = std::max(12.0f, H * 0.036f);
-		Text(c, int(W * 0.045f), int(H * 0.02f), "‹ 退格返回", f, { 200, 210, 230 }, 0.9f);
-
-		const int vx = int(W * 0.03f), vy = int(H * 0.075f);
-		const int vw = c.w - 2 * vx, vh = int(H * 0.68f);
+		const float f = std::max(12.0f, H * 0.034f);
+		const int   bottom = Prompts(c, { { "Enter", "拍照" }, { "↑", "拍照模式" }, { "退格", "返回" } });
+		const int   d = int(std::min(W * 0.16f, H * 0.1f));  // shutter size
+		const int   vx = int(W * 0.03f), vy = a_y + int(H * 0.02f);
+		const int   vw = c.w - 2 * vx, vh = bottom - vy - d - int(H * 0.04f);
 		g_camW = vw;
 		g_camH = vh;
 		const auto now = std::chrono::steady_clock::now();
@@ -483,52 +658,58 @@ namespace
 					std::memcpy(&c.px[(std::size_t(vy + y) * c.w + vx) * 4], &g_camFrame[std::size_t(y) * vw * 4], std::size_t(vw) * 4);
 				}
 			} else {
-				RoundRect(c, vx, vy, vw, vh, 0, { 0, 0, 0 }, { 12, 12, 16 });
-				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "取景中…", f * 1.2f, { 220, 220, 230 });
+				Rect(c, vx, vy, vw, vh, { 0, 0, 0 });
+				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "取景中…", f * 1.2f, kDim);
 			}
 			if (now < g_camFlashUntil) {
-				RoundRect(c, vx, vy, vw, vh, 0, { 255, 255, 255 }, { 255, 255, 255 }, 0.7f);
+				Rect(c, vx, vy, vw, vh, { 255, 255, 255 }, 0.7f);
 			}
+			const int m = int(W * 0.02f);
+			Brackets(c, vx + m, vy + m, vw - 2 * m, vh - 2 * m, int(std::min(vw, vh) * 0.09f), 3, kText);
 			if (now < g_camStatusUntil && !g_camStatus.empty()) {
-				const int tw = TextWidth(g_camStatus.c_str(), f) + int(f * 1.4f);
-				const int ty = vy + vh - int(f * 2.6f);
-				RoundRect(c, c.w / 2 - tw / 2, ty, tw, int(f * 1.8f), int(f * 0.9f), { 0, 0, 0 }, { 0, 0, 0 }, 0.6f);
-				TextCentered(c, c.w / 2, ty + int(f * 0.3f), g_camStatus.c_str(), f, { 255, 255, 255 });
+				const int tw = TextWidth(g_camStatus.c_str(), f) + int(f * 1.6f);
+				const int ty = vy + vh - int(f * 3.0f);
+				Rect(c, c.w / 2 - tw / 2, ty, tw, int(f * 1.8f), kBgTop, 0.8f);
+				Rect(c, c.w / 2 - tw / 2, ty, 3, int(f * 1.8f), kStripe[1]);
+				TextCentered(c, c.w / 2, ty + int(f * 0.3f), g_camStatus.c_str(), f, kText);
 			}
 		}
-
-		// shutter
-		const int d = int(std::min(W * 0.2f, H * 0.085f));
-		const int sy = vy + vh + int(H * 0.025f);
-		RoundRect(c, c.w / 2 - d / 2, sy, d, d, d / 2, { 255, 255, 255 }, { 230, 230, 230 });
-		const int in = int(d * 0.78f);
-		RoundRect(c, c.w / 2 - in / 2, sy + (d - in) / 2, in, in, in / 2, { 235, 235, 238 }, { 200, 200, 205 });
-		DrawHint(c, "回车 拍照   ↑ 拍照模式");
+		// shutter: white ring around a white disc
+		const int sy = vy + vh + (bottom - vy - vh - d) / 2;
+		RoundRect(c, c.w / 2 - d / 2, sy, d, d, d / 2, kText, kText);
+		const int ring = std::max(3, d / 14);
+		RoundRect(c, c.w / 2 - d / 2 + ring, sy + ring, d - 2 * ring, d - 2 * ring, d / 2 - ring, kBgBottom, kBgBottom);
+		const int in = d - 4 * ring;
+		RoundRect(c, c.w / 2 - in / 2, sy + (d - in) / 2, in, in, in / 2, kText, kText);
 	}
 
 	// one photo at a time, newest first; decoded on a worker thread
-	void DrawGallery(Canvas& c, const State& s)
+	void DrawGallery(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h), W = float(c.w);
 		const float f = std::max(12.0f, H * 0.036f);
-		Text(c, int(W * 0.045f), int(H * 0.02f), "‹ 退格返回", f, { 200, 210, 230 }, 0.9f);
-		const int n = int(g_galFiles.size());
+		const int   n = int(g_galFiles.size());
+		const bool  confirm = s.galConfirm;
+		const int   bottom = n ? Prompts(c, { { "←→", "翻看" }, { "Enter", confirm ? "确认删除" : "删除" }, { "退格", "返回" } }) :
+		                         Prompts(c, { { "退格", "返回" } });
 		if (!n) {
-			TextCentered(c, c.w / 2, int(H * 0.4f), "还没有照片", std::max(16.0f, H * 0.055f), { 255, 255, 255 });
-			TextCentered(c, c.w / 2, int(H * 0.4f) + int(H * 0.08f), "在相机里按回车拍照", f, { 190, 200, 220 }, 0.9f);
+			const int y = Header(c, a_y, "相册");
+			TextCentered(c, c.w / 2, y + int(H * 0.15f), "还没有照片", std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.15f) + int(H * 0.08f), "在相机里按 Enter 拍照", f, kDim);
 			return;
 		}
 		const int   idx = std::clamp(s.galIndex, 0, n - 1);
 		const auto& path = g_galFiles[idx];
-		const int   vx = int(W * 0.03f), vy = int(H * 0.075f);
-		const int   vw = c.w - 2 * vx, vh = int(H * 0.7f);
-		RoundRect(c, vx, vy, vw, vh, 0, { 0, 0, 0 }, { 0, 0, 0 }, 0.85f);
+		const int   infoH = int(f * 2.2f);
+		const int   vx = int(W * 0.03f), vy = a_y + int(H * 0.02f);
+		const int   vw = c.w - 2 * vx, vh = bottom - vy - infoH - int(H * 0.015f);
+		Rect(c, vx, vy, vw, vh, { 0, 0, 0 }, 0.85f);
 		{
 			std::lock_guard lk(g_camLock);
 			const bool current = g_galImgPath == path && g_galImgMaxW == vw && g_galImgMaxH == vh;
 			if (current && !g_galLoading) {
 				if (g_galImg.empty()) {
-					TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "无法打开", f * 1.2f, { 255, 160, 160 });
+					TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "无法打开", f * 1.2f, kWarn);
 				} else {
 					const int ox = vx + (vw - g_galImgW) / 2, oy = vy + (vh - g_galImgH) / 2;
 					for (int y = 0; y < g_galImgH && oy + y < c.h; ++y) {
@@ -537,7 +718,7 @@ namespace
 					}
 				}
 			} else {
-				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "加载中…", f * 1.2f, { 220, 220, 230 });
+				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "加载中…", f * 1.2f, kDim);
 				if (!g_galLoading) {
 					g_galLoading = true;
 					g_galImgPath = path;
@@ -563,107 +744,114 @@ namespace
 				}
 			}
 		}
-		const int ty = vy + vh + int(H * 0.02f);
-		char      info[96];
-		const auto cap = Gallery::Caption(path);
-		std::snprintf(info, sizeof(info), "%d / %d   %s", idx + 1, n, cap.c_str());
-		TextCentered(c, c.w / 2, ty, info, f, { 230, 235, 245 });
-		if (s.galConfirm) {
-			TextCentered(c, c.w / 2, ty + int(f * 1.6f), "再按回车删除（移到回收站）", f, { 255, 120, 120 });
+		Brackets(c, vx, vy, vw, vh, int(std::min(vw, vh) * 0.08f), 3, kText);
+		// info row: counter left, capture time right; delete confirmation replaces the time
+		const int ty = vy + vh + (infoH - int(f * 1.3f)) / 2 + int(H * 0.01f);
+		char      count[32];
+		std::snprintf(count, sizeof(count), "%02d / %02d", idx + 1, n);
+		const int pad = vx;
+		Text(c, pad, ty, count, f, kText);
+		if (confirm) {
+			const char* warn = "再按 Enter 删除（移到回收站）";
+			Text(c, c.w - pad - TextWidth(warn, f), ty, warn, f, kWarn);
+		} else {
+			const auto cap = Gallery::Caption(path);
+			Text(c, c.w - pad - TextWidth(cap.c_str(), f), ty, cap.c_str(), f, kDim);
 		}
-		DrawHint(c, "←→ 翻看   回车 删除");
 	}
 
-	void DrawQuests(Canvas& c, const State& s)
+	void DrawQuests(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h), W = float(c.w);
-		int         y = DrawHeader(c, "任务", kApps[1].top);
-		const int   pad = int(W * 0.06f);
-		const float nameF = std::max(14.0f, H * 0.047f);
-		const float objF = std::max(12.0f, H * 0.038f);
-		const int   bottom = c.h - int(H * 0.13f);
+		const int   pad = Pad(c);
+		const float nameF = std::max(13.0f, H * 0.044f);
+		const float objF = std::max(11.0f, H * 0.035f);
+		const bool  any = g_questsLoaded && !g_quests.empty();
+		const int   first = any ? std::clamp(s.questScroll, 0, int(g_quests.size()) - 1) : 0;
+		const int   bottom = any ? Prompts(c, { { "↑↓", "选择" }, { "Enter", g_quests[first].tracked ? "取消追踪" : "追踪" }, { "退格", "返回" } }) :
+		                           Prompts(c, { { "退格", "返回" } });
+		char        note[32] = "";
+		if (any) {
+			std::snprintf(note, sizeof(note), "%d / %d", first + 1, int(g_quests.size()));
+		}
+		int y = Header(c, a_y, "任务", any ? note : nullptr);
 		if (!g_questsLoaded) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", nameF, { 255, 255, 255 });
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", nameF, kDim);
 			return;
 		}
 		if (g_quests.empty()) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有进行中的任务", nameF, { 255, 255, 255 });
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有进行中的任务", nameF, kDim);
 			return;
 		}
-		const int first = std::clamp(s.questScroll, 0, int(g_quests.size()) - 1);
+		const int limit = bottom - int(H * 0.01f);
+		const int inner = int(W * 0.025f);  // text inset inside the selection block
 		int       shown = 0;
 		for (int i = first; i < int(g_quests.size()); ++i) {
 			const auto& q = g_quests[i];
 			// section header at the top of the page and wherever the quest type changes
 			if (!q.group.empty() && (i == first || q.group != g_quests[i - 1].group)) {
-				if (shown > 0 && y + int(objF * 1.6f) + int(nameF * 1.3f) > bottom) {
+				if (shown > 0 && y + int(objF * 1.8f) + int(nameF * 1.3f) > limit) {
 					break;
 				}
-				Text(c, pad, y, q.group.c_str(), objF * 0.9f, { 150, 200, 255 }, 0.95f);
-				y += int(objF * 1.5f);
+				Text(c, pad, y, q.group.c_str(), objF * 0.92f, kStripe[1]);
+				const int gw = TextWidth(q.group.c_str(), objF * 0.92f) + int(objF * 0.6f);
+				Rect(c, pad + gw, y + int(objF * 0.62f), c.w - 2 * pad - gw, 1, kLine);
+				y += int(objF * 1.6f);
 			}
-			const std::string title = q.tracked ? "★ " + q.name : q.name;
-			const auto        nameLines = Wrap(title, nameF, c.w - 2 * pad);
-			if (shown > 0 && y + int(nameF * 1.3f) * int(nameLines.size()) > bottom) {
+			const std::string title = q.tracked ? "◆ " + q.name : q.name;
+			const auto        nameLines = Wrap(title, nameF, c.w - 2 * pad - 2 * inner);
+			if (shown > 0 && y + int(nameF * 1.3f) * int(nameLines.size()) > limit) {
 				break;
 			}
 			std::vector<std::vector<std::string>> objLines;
 			int                                   blockH = int(nameF * 1.3f) * int(nameLines.size());
 			for (const auto& o : q.objectives) {
-				objLines.push_back(Wrap(o, objF, c.w - 2 * pad - int(objF * 1.2f)));
+				objLines.push_back(Wrap(o, objF, c.w - 2 * pad - 2 * inner - int(objF * 1.2f)));
 				blockH += int(objF * 1.3f) * int(objLines.back().size());
 			}
-			if (i == first) {  // selection highlight
-				const int hb = std::min(blockH, bottom - y) + int(H * 0.012f);
-				RoundRect(c, pad - int(W * 0.025f), y - int(H * 0.006f), c.w - 2 * pad + int(W * 0.05f), hb, int(H * 0.02f),
-					{ 255, 255, 255 }, { 255, 255, 255 }, 0.16f);
+			const bool sel = i == first;
+			if (sel) {
+				Rect(c, pad, y - int(H * 0.008f), c.w - 2 * pad, std::min(blockH, limit - y) + int(H * 0.016f), kSelBg);
 			}
-			const Rgb nameColor = q.tracked ? Rgb{ 255, 214, 10 } : Rgb{ 240, 240, 245 };
+			const Rgb nameColor = sel ? kSelText : (q.tracked ? kGold : kText);
+			const Rgb objColor = sel ? Rgb{ 70, 76, 84 } : kDim;
 			for (const auto& l : nameLines) {
-				Text(c, pad, y, l.c_str(), nameF, nameColor);
+				Text(c, pad + inner, y, l.c_str(), nameF, nameColor);
 				y += int(nameF * 1.3f);
 			}
 			for (const auto& lines : objLines) {
 				for (std::size_t k = 0; k < lines.size(); ++k) {
-					if (y + int(objF * 1.3f) > bottom) break;
-					if (k == 0) Text(c, pad, y, "•", objF, { 220, 230, 245 });
-					Text(c, pad + int(objF * 1.2f), y, lines[k].c_str(), objF, { 220, 230, 245 });
+					if (y + int(objF * 1.3f) > limit) break;
+					if (k == 0) Text(c, pad + inner, y, "·", objF, objColor);
+					Text(c, pad + inner + int(objF * 1.2f), y, lines[k].c_str(), objF, objColor);
 					y += int(objF * 1.3f);
 				}
 			}
-			y += int(H * 0.025f);
+			y += int(H * 0.028f);
 			++shown;
-			if (y > bottom) break;
+			if (y > limit) break;
 		}
-		char hint[64];
-		std::snprintf(hint, sizeof(hint), "↑↓ 选择  回车 %s   %d/%d", g_quests[first].tracked ? "取消追踪" : "追踪", first + 1,
-			int(g_quests.size()));
-		DrawHint(c, hint);
 	}
 
-	void DrawPlaceholder(Canvas& c, const State& s)
+	void DrawPlaceholder(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h);
-		const int   y = DrawHeader(c, kApps[s.openedApp].label, kApps[s.openedApp].top);
-		TextCentered(c, c.w / 2, y + int(H * 0.12f), "即将推出", std::max(16.0f, H * 0.06f), { 255, 255, 255 });
+		Prompts(c, { { "退格", "返回" } });
+		const int y = Header(c, a_y, kApps[s.openedApp].label);
+		TextCentered(c, c.w / 2, y + int(H * 0.14f), "即将推出", std::max(16.0f, H * 0.055f), kDim);
 	}
 
 	void DrawPage(Canvas& c, const State& s)
 	{
-		if (s.page == kHome) {
-			DrawHome(c, s);
-			return;
-		}
+		const int y = StatusBar(c, s);
 		switch (s.page) {
-		case kSettingsPage: DrawSettings(c, s); break;
-		case kCameraPage: DrawCamera(c, s); break;
-		case kGalleryPage: DrawGallery(c, s); break;
-		case kQuestsPage: DrawQuests(c, s); break;
-		default: DrawPlaceholder(c, s); break;
+		case kHome: DrawHome(c, s, y); break;
+		case kSettingsPage: DrawSettings(c, s, y); break;
+		case kCameraPage: DrawCamera(c, s, y); break;
+		case kGalleryPage: DrawGallery(c, s, y); break;
+		case kQuestsPage: DrawQuests(c, s, y); break;
+		default: DrawPlaceholder(c, s, y); break;
 		}
-		// home indicator
-		const int ind = int(c.w * 0.28f);
-		RoundRect(c, c.w / 2 - ind / 2, c.h - int(c.h * 0.03f) - 4, ind, std::max(4, int(c.h * 0.009f)), 3, { 255, 255, 255 }, { 255, 255, 255 }, 0.8f);
 	}
 }
 
