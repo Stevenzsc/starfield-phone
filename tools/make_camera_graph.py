@@ -1,9 +1,14 @@
-"""Add the phone's Camera hold state to the vanilla 1st-person root graph.
+"""Add the phone's Camera hold state to the vanilla 1st-person animation data.
 
-Usage: py -I tools/make_camera_graph.py <vanilla Human_1stPersonRoot.agx> <out .agx> [<vanilla animationfiles.txt> <out>]
+Usage: py -I tools/make_camera_graph.py <vanilla AnimTextData dir> <out AnimTextData dir>
 
-With the index arguments it also writes Meshes/AnimTextData/AnimationFiles.txt with the new animation's .af / .afx
-added (every animation file the game loads must be listed there).
+The vanilla dir is Meshes/AnimTextData extracted from Starfield - Animations.ba2 (needs AnimationFiles.txt,
+Tables/anim_events.xtbl, Tables/anim_states.xtbl, Tables/Graphs/Human_1stPersonRoot.agx). Written, same layout:
+- Tables/Graphs/Human_1stPersonRoot.agx: the graph with the new state (below)
+- Tables/anim_events.xtbl: PhoneCameraIn / PhoneCameraOut declared (the engine rejects undeclared events; the
+  ChronoMark MK II mod ships the same pair of files for its 1st-person state)
+- Tables/anim_states.xtbl: tag PhoneCamera declared next to Idle
+- AnimationFiles.txt: the new .af / .afx listed (every animation file the game loads must be listed there)
 
 The dataslate / digipick state machine (Equip -> Idle -> Unequip -> None) gets a fifth state, PhoneCamera
 (tag PhoneCamera; with the DataSlate suffix the graph plays PhoneCamera_DataSlate.af):
@@ -47,8 +52,7 @@ def input_block(nl, in_id, idx, src_node, src_out, event, template):
     return b[:k] + event + b[j:]
 
 
-def main():
-    src, dst = sys.argv[1:3]
+def graph(src, dst):
     raw = open(src, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"
     t = raw.replace("\r\n", "\n")
@@ -133,7 +137,41 @@ def index(src, dst):
     print(f"{dst}: {len(lines)} entries ({', '.join(NEW_FILES)})")
 
 
+def table(src, dst, entries, key):
+    """Add entries to a sorted .xtbl table; key = the tag holding the name (name0 for events, name for states)."""
+    raw = open(src, "rb").read().decode("utf-8")
+    nl = "\r\n" if "\r\n" in raw else "\n"
+    t = raw.replace("\r\n", "\n")
+    rows = re.findall(r"\t<entry>.*?</entry>\n", t)
+    names = [re.search(f"<{key}>(.*?)</{key}>", r).group(1) for r in rows]
+    for name, row in entries:
+        if name in names:
+            continue
+        later = [i for i, n in enumerate(names) if n.lower() > name.lower()]
+        anchor = rows[later[0]] if later else None
+        if anchor:
+            t = one(t, anchor, row + "\n" + anchor)
+        else:
+            t = one(t, "</table>", row + "\n</table>")
+        rows = re.findall(r"\t<entry>.*?</entry>\n", t)
+        names = [re.search(f"<{key}>(.*?)</{key}>", r).group(1) for r in rows]
+    open(dst, "wb").write(t.replace("\n", nl).encode("utf-8"))
+    print(f"{dst}: {', '.join(n for n, _ in entries)}")
+
+
+def main():
+    import os
+    src, dst = sys.argv[1:3]
+    for d in ("Tables/Graphs",):
+        os.makedirs(os.path.join(dst, d), exist_ok=True)
+    graph(os.path.join(src, "Tables/Graphs/Human_1stPersonRoot.agx"), os.path.join(dst, "Tables/Graphs/Human_1stPersonRoot.agx"))
+    events = [(e, f"\t<entry><name0>{e}</name0><name1>Both</name1><name2>True</name2></entry>")
+              for e in ("PhoneCameraIn", "PhoneCameraOut")]  # like DataSlateClose
+    table(os.path.join(src, "Tables/anim_events.xtbl"), os.path.join(dst, "Tables/anim_events.xtbl"), events, "name0")
+    table(os.path.join(src, "Tables/anim_states.xtbl"), os.path.join(dst, "Tables/anim_states.xtbl"),
+          [(TAG, f"\t<entry><name>{TAG}</name></entry>")], "name")
+    index(os.path.join(src, "AnimationFiles.txt"), os.path.join(dst, "AnimationFiles.txt"))
+
+
 if __name__ == "__main__":
     main()
-    if len(sys.argv) > 4:
-        index(sys.argv[3], sys.argv[4])
