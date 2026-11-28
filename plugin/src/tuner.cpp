@@ -850,56 +850,43 @@ namespace
 		bool           haveWritten[kBones]{};
 	} g_arr;
 
-	// (g_armLock held)
+	// (g_armLock held) bone index of each arm bone in the pose arrays. The component itself holds the map the engine
+	// uses to write the NiNode worlds back (FUN_142BE93F0): +0x18 u32 count, +0x20 entries of 0x10 bytes
+	// { u16 pose index, pad, NiNode* node }. (A node-pointer table found by scanning had a different order: the subtree
+	// walk then never reached the upper arm.)
 	void FindBoneTable(std::uintptr_t a_comp, std::uint16_t a_count)
 	{
 		g_arr = {};
 		g_arr.comp = a_comp;
 		g_arr.searched = true;
-		const auto clav = reinterpret_cast<std::uintptr_t>(g_arm.bones[0].node);
-		// candidate tables: pointers stored in the component (0x200 bytes), in its +0x10 block (0x100 bytes), and
-		// the +0x10 of each of those (arrays sit at +0x10 of a header, like the transform arrays)
-		std::uintptr_t cands[256];
-		int            n = 0;
-		for (std::uintptr_t base : { a_comp, ReadPtr(a_comp + 0x10) }) {
-			for (std::uintptr_t off = 0; base && off < (base == a_comp ? 0x200u : 0x100u) && n < 250; off += 8) {
-				const auto v = ReadPtr(base + off);
-				if (v > 0x10000) {
-					cands[n++] = v;
-					const auto inner = ReadPtr(v + 0x10);
-					if (inner > 0x10000) cands[n++] = inner;
+		std::uint32_t n = 0;
+		SafeCopy(reinterpret_cast<const void*>(a_comp + 0x18), &n, sizeof(n));
+		const auto entries = ReadPtr(a_comp + 0x20);
+		if (!entries || n == 0 || n > 4096) {
+			REX::WARN("arm: pose component has no node map (count {})", n);
+			return;
+		}
+		int idx[kBones] = { -1, -1, -1, -1 };
+		for (std::uint32_t k = 0; k < n; ++k) {
+			std::uint16_t pi = 0;
+			SafeCopy(reinterpret_cast<const void*>(entries + std::uintptr_t(k) * 0x10), &pi, sizeof(pi));
+			const auto node = ReadPtr(entries + std::uintptr_t(k) * 0x10 + 8);
+			for (int b = 0; b < kBones; ++b) {
+				if (node && node == reinterpret_cast<std::uintptr_t>(g_arm.bones[b].node) && pi < a_count) {
+					idx[b] = pi;
 				}
 			}
 		}
-		for (int c = 0; c < n; ++c) {
-			const auto tbl = cands[c];
-			for (int i = 0; i < a_count; ++i) {
-				if (ReadPtr(tbl + std::uintptr_t(i) * 8) != clav) {
-					continue;
-				}
-				// clavicle at i: look up the other bones in the same table
-				int  idx[kBones] = { i, -1, -1, -1 };
-				bool all = true;
-				for (int b = 1; b < kBones; ++b) {
-					const auto node = reinterpret_cast<std::uintptr_t>(g_arm.bones[b].node);
-					for (int k = 0; k < a_count; ++k) {
-						if (ReadPtr(tbl + std::uintptr_t(k) * 8) == node) {
-							idx[b] = k;
-							break;
-						}
-					}
-					all = all && idx[b] >= 0;
-				}
-				REX::INFO("arm: node table {:X}: clavicle {}, upper arm {}, forearm {}, wrist {}", tbl, idx[0], idx[1], idx[2], idx[3]);
-				if (all) {
-					g_arr.table = tbl;
-					for (int b = 0; b < kBones; ++b) g_arr.index[b] = idx[b];
-					g_arr.ok = true;
-					return;
-				}
-			}
+		REX::INFO("arm: node map {:X} ({} entries): clavicle {}, upper arm {}, forearm {}, wrist {}", entries, n, idx[0], idx[1], idx[2], idx[3]);
+		bool all = true;
+		for (int b = 0; b < kBones; ++b) {
+			all = all && idx[b] >= 0;
+			g_arr.index[b] = idx[b];
 		}
-		REX::WARN("arm: no bone node table found in the pose component ({} candidates)", n);
+		g_arr.ok = all;
+		if (!all) {
+			REX::WARN("arm: not every arm bone is in the pose component's node map");
+		}
 	}
 
 	// (g_armLock held) before the component computes: offsets into the local array entries
@@ -1164,8 +1151,12 @@ namespace
 		std::uint32_t count = 0;
 		SafeCopy(reinterpret_cast<const void*>(base + 0x1038), &count, sizeof(count));
 		const auto pairs = ReadPtr(base + 0x1040);
+		static const void* loggedFor = nullptr;
 		if (!pairs || count == 0 || count > 4096) {
-			REX::INFO("arm: no source pairs on the player (count {})", count);
+			if (loggedFor != g_arm.bones[0].node) {
+				loggedFor = g_arm.bones[0].node;
+				REX::INFO("arm: no source pairs on the player (count {})", count);
+			}
 			return;
 		}
 		int found = 0;
