@@ -8,6 +8,7 @@
 #include <xinput.h>
 
 #include <chrono>
+#include <cstdlib>
 
 namespace
 {
@@ -23,6 +24,8 @@ namespace
 	clock::time_point g_downAt[32]{};
 	clock::time_point g_nextRepeat[32]{};
 	bool              g_gestureLatched = false;
+	bool              g_stickActive = false;  // a stick is pushed (last poll)
+	bool              g_active = false;       // pad used in the last Update (button down or stick pushed)
 
 	constexpr auto kPollEvery = std::chrono::milliseconds(8);
 	constexpr auto kScanEvery = std::chrono::seconds(1);  // XInputGetState on an empty slot is slow: look rarely
@@ -59,6 +62,10 @@ namespace
 		std::uint32_t b = st.Gamepad.wButtons & 0xF3FF;
 		if (st.Gamepad.bLeftTrigger > 128) b |= Gamepad::kLT;
 		if (st.Gamepad.bRightTrigger > 128) b |= Gamepad::kRT;
+		// sticks pushed well past the dead zone count as "the pad is in use" (not as buttons)
+		constexpr int kStickActive = 16000;
+		g_stickActive = std::abs(int(st.Gamepad.sThumbLX)) > kStickActive || std::abs(int(st.Gamepad.sThumbLY)) > kStickActive ||
+		                std::abs(int(st.Gamepad.sThumbRX)) > kStickActive || std::abs(int(st.Gamepad.sThumbRY)) > kStickActive;
 		return b;
 	}
 }
@@ -69,6 +76,7 @@ namespace Gamepad
 	{
 		g_pressed = 0;
 		g_repeat = 0;
+		g_active = false;
 		const auto now = clock::now();
 		if (now < g_nextPoll || !Load()) return;
 		g_nextPoll = now + kPollEvery;
@@ -96,6 +104,7 @@ namespace Gamepad
 		g_prev = g_now;
 		g_now = b;
 		g_pressed = g_now & ~g_prev;
+		g_active = g_pressed != 0 || g_stickActive;
 		for (int i = 0; i < 32; ++i) {
 			const std::uint32_t m = 1u << i;
 			if (g_pressed & m) {
@@ -113,6 +122,7 @@ namespace Gamepad
 	}
 
 	bool          Connected() { return g_pad >= 0; }
+	bool          Active() { return g_active; }
 	bool          Down(std::uint32_t a_buttons) { return a_buttons && (g_now & a_buttons) == a_buttons; }
 	bool          Pressed(std::uint32_t a_button) { return (g_pressed & a_button) != 0; }
 	bool          Repeat(std::uint32_t a_button) { return (g_repeat & a_button) != 0; }

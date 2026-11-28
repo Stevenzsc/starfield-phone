@@ -29,6 +29,7 @@ namespace Gamepad
 
 	void Update();
 	bool Connected();
+	bool Active();  // a button went down or a stick is pushed in the last Update (the player uses the pad)
 
 	bool Down(std::uint32_t a_buttons);     // all of them held now
 	bool Pressed(std::uint32_t a_button);   // went down in the last Update

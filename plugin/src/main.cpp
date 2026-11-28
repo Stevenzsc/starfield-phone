@@ -532,6 +532,28 @@ namespace
 
 	bool g_padNavHold = false;  // controller buttons used to open / close are still held
 
+	// a key or mouse button went down since the last check (checked every 50 ms; the task runs far more often)
+	bool KeyboardUsed()
+	{
+		static std::array<bool, 256>                 was{};
+		static std::chrono::steady_clock::time_point next{};
+		const auto                                   now = std::chrono::steady_clock::now();
+		if (now < next) {
+			return false;
+		}
+		next = now + std::chrono::milliseconds(50);
+		bool used = false;
+		for (int vk = 0x01; vk < 0xFF; ++vk) {
+			if (vk == 0x03 || vk == 0x07 || (vk >= 0xC3 && vk <= 0xDA)) {
+				continue;  // cancel, reserved, VK_GAMEPAD_* (the pad must not count as keyboard)
+			}
+			const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+			used = used || (down && !was[std::size_t(vk)]);
+			was[std::size_t(vk)] = down;
+		}
+		return used;
+	}
+
 	// take the phone out or put it away (open key, controller gesture, B on the home screen)
 	void TogglePhone()
 	{
@@ -608,6 +630,12 @@ namespace
 
 		// controller: the chosen gesture toggles the phone; D-pad / A / B navigate while it is out
 		Gamepad::Update();
+		// button prompts follow the device in use: any pad button or stick -> A / B; any key or mouse button -> keys
+		if (Gamepad::Active()) {
+			Ui::SetPadPrompts(true);
+		} else if (KeyboardUsed()) {
+			Ui::SetPadPrompts(false);
+		}
 		if (Gamepad::OpenGesture(Gamepad::Open(Ui::GetSettings().padOpen)) && g_steps.empty()) {
 			TogglePhone();
 			g_padNavHold = true;  // the gesture's buttons are still down: no navigation until they are released

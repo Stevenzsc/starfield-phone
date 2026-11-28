@@ -832,6 +832,29 @@ namespace
 		std::snprintf(a_out, sizeof(a_out), "%02d:%02d", hh, mm);
 	}
 
+	const char* PromptKey(const char* a_key);  // below: key label as shown (A / B while the controller is in use)
+
+	// one key cap of a prompt bar: keys in a framed box; controller face buttons as round buttons in their colours
+	void KeyCap(Canvas& c, int a_x, int a_y, int a_w, int a_h, const char* a_key, float a_px, int a_dx, int a_dy)
+	{
+		const std::string_view k = a_key;
+		Rgb                    col{};
+		bool                   face = true;
+		if (k == "A") col = { 96, 168, 56 };
+		else if (k == "B") col = { 214, 62, 56 };
+		else if (k == "X") col = { 56, 120, 210 };
+		else if (k == "Y") col = { 230, 180, 40 };
+		else face = false;
+		if (face) {
+			const int d = a_h, cx = a_x + a_w / 2;
+			RoundRect(c, cx - d / 2, a_y, d, d, d / 2, col, col);
+			TextCentered(c, cx, a_y + a_dy, a_key, a_px, { 255, 255, 255 });
+			return;
+		}
+		Frame(c, a_x, a_y, a_w, a_h, 2, kText, 0.9f);
+		Text(c, a_x + a_dx, a_y + a_dy, a_key, a_px, kText);
+	}
+
 	// status bar: time left, network + signal + battery right, thin rule below; returns the y under it
 	int StatusBar(Canvas& c, const State& s)
 	{
@@ -883,7 +906,7 @@ namespace
 				const char* key;
 				const char* label;
 			};
-			const KeyLabel items[] = { { "Enter", Tr("拍照") }, { Tr("退格"), Tr("返回") } };
+			const KeyLabel items[] = { { PromptKey("Enter"), Tr("拍照") }, { PromptKey(Tr("退格")), Tr("返回") } };
 			const int      left = afterIcons + int(f * 0.4f), right = netX - int(f * 0.8f);
 			float          pf = f * 0.8f;
 			auto           width = [&](float a_f) {
@@ -903,8 +926,7 @@ namespace
 					Text(c, x, by + int(pf * 0.18f), items[i].label, pf, kText);
 					const int kw = TextWidth(items[i].key, pf * 0.85f) + int(pf * 0.8f);
 					x -= kw + int(pf * 0.35f);
-					Frame(c, x, by, kw, boxH, 2, kText, 0.9f);
-					Text(c, x + int(pf * 0.4f), by + int(pf * 0.26f), items[i].key, pf * 0.85f, kText);
+					KeyCap(c, x, by, kw, boxH, items[i].key, pf * 0.85f, int(pf * 0.4f), int(pf * 0.26f));
 					x -= int(pf * 0.9f);
 				}
 			}
@@ -983,8 +1005,7 @@ namespace
 			Text(c, x, by + int(f * 0.2f), it->label, f, kText);
 			const int kw = TextWidth(it->key, f * 0.85f) + int(f * 0.8f);
 			x -= kw + int(f * 0.4f);
-			Frame(c, x, by, kw, boxH, 2, kText, 0.9f);
-			Text(c, x + int(f * 0.4f), by + int(f * 0.28f), it->key, f * 0.85f, kText);
+			KeyCap(c, x, by, kw, boxH, it->key, f * 0.85f, int(f * 0.4f), int(f * 0.28f));
 			x -= int(f * 1.1f);
 		}
 		return atTop ? top + barH : top;
