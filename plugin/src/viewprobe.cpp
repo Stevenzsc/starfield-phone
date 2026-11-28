@@ -491,7 +491,10 @@ namespace ViewProbe
 				return;
 			}
 			g_stage = Stage::kReady;
-			[[fallthrough]];
+			// the render thread sees new table rows a frame or more later: queueing the output in the frame it was
+			// created crashed in the render graph (FUN_142AA3790 indexing the per-output array)
+			g_nextQueue = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+			return;
 		case Stage::kReady: {
 			const auto now = std::chrono::steady_clock::now();
 			if (now < g_nextQueue) {
