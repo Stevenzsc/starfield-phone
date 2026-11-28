@@ -652,52 +652,135 @@ namespace
 		return true;
 	}
 
-	void ArmTick(float a_weight)
+	// ---- applying the offsets: hook UpdateWorldData (vtable +0x278) of the bones' class ----
+	// Writing the bones from the SFSE task only worked when the task happened to run between the animation and the
+	// scene update (seen working in one session, not in the next). NiNode::Update (+0x248) calls UpdateWorldData
+	// (+0x278) on a node and then updates its children, and every update path ends in +0x278, after the animation
+	// has written the bones' locals: put our offset into the local right there and let the engine do the rest.
+	constexpr std::size_t kUpdateWorldDataSlot = 0x278 / 8;
+	using UpdateWorldData_t = void (*)(RE::NiAVObject*, void*);
+	struct VtblHook
 	{
-		if (!FindArm()) {
+		void**            vtbl = nullptr;
+		UpdateWorldData_t orig = nullptr;
+	};
+	VtblHook                      g_vtblHooks[kBones];
+	std::atomic<RE::NiAVObject*>  g_hookBones[kBones]{};
+	std::atomic<float>            g_armWeight{ 0.0F };
+	std::mutex                    g_armLock;  // g_arm.bones[] state touched from the update threads
+
+	void ApplyBoneOffset(int a_bone)
+	{
+		std::lock_guard lk(g_armLock);
+		auto&           bone = g_arm.bones[a_bone];
+		if (!bone.node) {
 			return;
 		}
-		++g_arm.ticks;
-		for (int b = 0; b < kBones; ++b) {
-			auto& bone = g_arm.bones[b];
-			const bool rewritten = !bone.haveWritten || !SameXf(bone.node->local, bone.written);
-			if (rewritten) {
-				bone.animLocal = bone.node->local;  // fresh from the animation
-				if (b == 1) ++g_arm.rewritten;
-			}
-			Xf off;
-			off.rot = g_boneRot[b];
-			const Mat       d = a_weight >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, a_weight).rot;
-			RE::NiTransform out = bone.animLocal;
-			SetMat(out.rotate, Mul(MatOf(bone.animLocal), d));
-			bone.node->local = out;
-			bone.written = out;
-			bone.haveWritten = true;
+		const float w = g_armWeight.load();
+		if (a_bone == 1) ++g_arm.ticks;
+		const bool  fresh = !bone.haveWritten || !SameXf(bone.node->local, bone.written);
+		if (fresh) {
+			bone.animLocal = bone.node->local;  // the animation's value for this frame
+			if (a_bone == 1) ++g_arm.rewritten;
 		}
-		auto* top = g_arm.bones[0].node;
-		UpdateSubtreeWorld(top, g_arm.conv, *reinterpret_cast<void* const*>(top));
+		if (w <= 0.0F) {
+			if (!fresh) {
+				bone.node->local = bone.animLocal;  // take our offset back out
+			}
+			bone.haveWritten = false;
+			return;
+		}
+		Xf off;
+		off.rot = g_boneRot[a_bone];
+		const Mat       d = w >= 1.0F ? g_boneRot[a_bone] : Blend(Xf{}, off, w).rot;
+		RE::NiTransform out = bone.animLocal;
+		SetMat(out.rotate, Mul(MatOf(bone.animLocal), d));
+		bone.node->local = out;
+		bone.written = out;
+		bone.haveWritten = true;
+	}
 
-		const auto now = std::chrono::steady_clock::now();
-		if (now >= g_arm.nextLog) {
-			g_arm.nextLog = now + std::chrono::seconds(5);
-			REX::INFO("arm: {} ticks, upper arm rewritten by the game in {} of them", g_arm.ticks, g_arm.rewritten);
-			g_arm.ticks = g_arm.rewritten = 0;
+	void UpdateWorldData_Hook(RE::NiAVObject* a_self, void* a_data)
+	{
+		UpdateWorldData_t orig = nullptr;
+		void** const      vtbl = *reinterpret_cast<void***>(a_self);
+		for (const auto& h : g_vtblHooks) {
+			if (h.vtbl == vtbl) {
+				orig = h.orig;
+				break;
+			}
+		}
+		for (int b = 0; b < kBones; ++b) {
+			if (g_hookBones[b].load() == a_self) {
+				ApplyBoneOffset(b);
+				break;
+			}
+		}
+		if (orig) {
+			orig(a_self, a_data);
 		}
 	}
 
-	void ArmRelease()
+	void HookVtblOf(RE::NiAVObject* a_obj)
 	{
-		bool any = false;
-		for (auto& bone : g_arm.bones) {
-			if (bone.node && bone.haveWritten && SameXf(bone.node->local, bone.written)) {
-				bone.node->local = bone.animLocal;  // nothing rewrote it: put the animation's value back
-				any = true;
+		void** const vtbl = *reinterpret_cast<void***>(a_obj);
+		for (auto& h : g_vtblHooks) {
+			if (h.vtbl == vtbl) {
+				return;  // already hooked
 			}
 		}
-		if (any && g_arm.bones[0].node) {
-			auto* top = g_arm.bones[0].node;
-			UpdateSubtreeWorld(top, g_arm.conv, *reinterpret_cast<void* const*>(top));
+		for (auto& h : g_vtblHooks) {
+			if (!h.vtbl) {
+				std::uint32_t old = 0;
+				if (!REX::W32::VirtualProtect(&vtbl[kUpdateWorldDataSlot], sizeof(void*), REX::W32::PAGE_EXECUTE_READWRITE, &old)) {
+					REX::ERROR("arm: VirtualProtect failed");
+					return;
+				}
+				h.orig = reinterpret_cast<UpdateWorldData_t>(vtbl[kUpdateWorldDataSlot]);
+				h.vtbl = vtbl;
+				vtbl[kUpdateWorldDataSlot] = reinterpret_cast<void*>(&UpdateWorldData_Hook);
+				REX::W32::VirtualProtect(&vtbl[kUpdateWorldDataSlot], sizeof(void*), old, &old);
+				REX::INFO("arm: hooked UpdateWorldData of vtable {:X} ({})", reinterpret_cast<std::uintptr_t>(vtbl), NameOf(a_obj));
+				return;
+			}
 		}
+	}
+
+	// task side: find the bones, hook their class once, publish them and the blend weight
+	void ArmTick(float a_weight)
+	{
+		{
+			std::lock_guard lk(g_armLock);
+			if (!FindArm()) {
+				return;
+			}
+		}
+		for (int b = 0; b < kBones; ++b) {
+			HookVtblOf(g_arm.bones[b].node);
+			g_hookBones[b] = g_arm.bones[b].node;
+		}
+		g_armWeight = a_weight;
+		const auto now = std::chrono::steady_clock::now();
+		std::lock_guard lk(g_armLock);
+		if (now >= g_arm.nextLog) {
+			g_arm.nextLog = now + std::chrono::seconds(5);
+			REX::INFO("arm: weight {:.2f}, upper arm UpdateWorldData calls {}, animation writes {}", a_weight, g_arm.ticks, g_arm.rewritten);
+			g_arm.rewritten = g_arm.ticks = 0;
+		}
+	}
+
+	// weight 0: the hook takes the offsets out on the next update; then stop following the bones
+	void ArmRelease()
+	{
+		g_armWeight = 0.0F;
+	}
+
+	void ArmForget()
+	{
+		for (auto& b : g_hookBones) {
+			b = nullptr;
+		}
+		std::lock_guard lk(g_armLock);
 		g_arm = {};
 	}
 
@@ -792,7 +875,7 @@ namespace Tuner
 			}
 			g_applied = Mode::kNone;
 			weight = 0.0F;
-			g_arm = {};
+			ArmForget();
 			g_target = 0;
 			return;
 		}
@@ -893,7 +976,7 @@ namespace Tuner
 		g_applied = mode;
 		if (weight > 0.0F) {
 			ArmTick(s);
-		} else if (g_arm.bones[0].node) {
+		} else {
 			ArmRelease();
 		}
 	}
