@@ -821,18 +821,21 @@ namespace
 
 	void Update3D_Hook(void* a_actor, float a_dt, void* a_root, void* a_camera, char a_first, char a_flag, std::uint8_t a_p7)
 	{
-		if (a_first) {
+		g_update3DOrig(a_actor, a_dt, a_root, a_camera, a_first, a_flag, a_p7);
+		// After the call: it has just written the 1st-person bones' world transforms from the skeleton's pose
+		// arrays (FUN_142BE93F0, traced). Override them the way the in-game tuning session did (and saw working):
+		// offsets into the locals, then the arm subtree's world transforms recomputed (convention 1 =
+		// localRot * parentRot, measured with zero error). Rendering reads the worlds after this.
+		if (a_first && g_hookBones[0].load()) {
 			++g_update3DCalls;
-			if (g_hookBones[0].load()) {
-				for (int b = 0; b < kBones; ++b) {
-					ApplyBoneOffset(b);  // NiNode locals (copies) for anything that reads them
-				}
-				std::lock_guard lk(g_armLock);
-				FindPose();
-				ApplyPoseOffsets(g_armWeight.load());
+			for (int b = 0; b < kBones; ++b) {
+				ApplyBoneOffset(b);
+			}
+			if (g_armWeight.load() > 0.0F || g_arm.bones[0].haveWritten) {
+				auto* top = g_hookBones[0].load();
+				UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
 			}
 		}
-		g_update3DOrig(a_actor, a_dt, a_root, a_camera, a_first, a_flag, a_p7);
 	}
 
 	// task side: find the bones, publish them and the blend weight
