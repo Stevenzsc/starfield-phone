@@ -449,33 +449,37 @@ namespace
 		static const RE::BSFixedString out("PhoneCameraOut");
 		static std::ptrdiff_t          field = -1;
 		const RE::BSFixedString&       ev = a_in ? in : out;
+		// a BSFixedString is one pointer to its pool entry
+		static_assert(sizeof(RE::BSFixedString) == sizeof(void*));
+		const auto entry = [](const RE::BSFixedString& a_s) { return *reinterpret_cast<const void* const*>(&a_s); };
 
 		auto* idle = RE::TESForm::LookupByID(kIdleDataSlateClose);
-		if (!idle || !close.hash_accessor()) {
+		if (!idle || !entry(close)) {
 			REX::WARN("camera hold: IDLE {:08X} not found", kIdleDataSlateClose);
 			return false;
 		}
 		const auto base = reinterpret_cast<std::uintptr_t>(idle);
 		if (field < 0) {
 			for (std::ptrdiff_t off = 0x30; off < 0x200; off += 8) {
-				if (*reinterpret_cast<const void* const*>(base + off) == close.hash_accessor()) {
+				if (*reinterpret_cast<const void* const*>(base + off) == entry(close)) {
 					field = off;
 					break;
 				}
 			}
-			REX::INFO("camera hold: IDLE {:08X} event field at +0x{:X}", kIdleDataSlateClose, field);
 			if (field < 0) {
+				REX::WARN("camera hold: IDLE {:08X} holds no DataSlateClose string", kIdleDataSlateClose);
 				return false;
 			}
+			REX::INFO("camera hold: IDLE {:08X} event field at +0x{:X}", kIdleDataSlateClose, field);
 		}
 		auto* slot = reinterpret_cast<const void**>(base + field);
-		if (*slot != close.hash_accessor()) {
+		if (*slot != entry(close)) {
 			REX::WARN("camera hold: IDLE event field changed, not sending {}", ev.c_str());
 			return false;
 		}
-		*slot = ev.hash_accessor();
+		*slot = entry(ev);
 		const bool ok = PerformRaw(kBindings[1]);
-		*slot = close.hash_accessor();
+		*slot = entry(close);
 		REX::INFO("camera hold: {} -> PerformAction returned {}", ev.c_str(), ok);
 		return ok;
 	}
