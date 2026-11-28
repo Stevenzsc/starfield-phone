@@ -867,7 +867,9 @@ namespace
 	};
 
 	// button prompts along the bottom, right-aligned like the game's ([Enter] Select); returns the bar's top y
-	int Prompts(Canvas& c, std::initializer_list<Prompt> a_items)
+	// a_top < 0: bar along the bottom, returns its top y; a_top >= 0: bar starting at a_top (rule below it), returns
+	// the y under it
+	int Prompts(Canvas& c, std::initializer_list<Prompt> a_items, int a_top = -1)
 	{
 		const float H = float(c.h);
 		const int   pad = Pad(c);
@@ -882,8 +884,9 @@ namespace
 		};
 		while (f > 8.0f && width(f) > c.w - 2 * pad) f *= 0.94f;
 		const int   barH = int(H * 0.08f);
-		const int   top = c.h - barH;
-		Rect(c, pad, top, c.w - 2 * pad, 1, kLine);
+		const bool  atTop = a_top >= 0;
+		const int   top = atTop ? a_top : c.h - barH;
+		Rect(c, pad, atTop ? top + barH - 1 : top, c.w - 2 * pad, 1, kLine);
 		const int boxH = int(f * 1.45f);
 		const int by = top + (barH - boxH) / 2;
 		int       x = c.w - pad;
@@ -897,7 +900,7 @@ namespace
 			Text(c, x + int(f * 0.4f), by + int(f * 0.28f), it->key, f * 0.85f, kText);
 			x -= int(f * 1.1f);
 		}
-		return top;
+		return atTop ? top + barH : top;
 	}
 
 	void DrawHome(Canvas& c, const State& s, int a_y)
@@ -1010,9 +1013,11 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const float f = std::max(12.0f, H * 0.034f);
-		const int   bottom = Prompts(c, { { "Enter", Tr("拍照") }, { "↑", Tr("拍照模式") }, { Tr("退格"), Tr("返回") } });
+		// prompts on top: the bottom of the screen sits behind the hand in the photo pose
+		const int   barEnd = Prompts(c, { { "Enter", Tr("拍照") }, { Tr("退格"), Tr("返回") } }, a_y);
+		const int   bottom = c.h - int(H * 0.02f);
 		const int   d = int(std::min(W * 0.16f, H * 0.1f));  // shutter size
-		const int   vx = int(W * 0.03f), vy = a_y + int(H * 0.02f);
+		const int   vx = int(W * 0.03f), vy = barEnd + int(H * 0.015f);
 		const int   vw = c.w - 2 * vx, vh = bottom - vy - d - int(H * 0.04f);
 		g_camW = vw;
 		g_camH = vh;
