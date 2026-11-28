@@ -1109,6 +1109,113 @@ namespace
 		REX::INFO("arm: no pose component above the clavicle (the NiNodes drive the arm)");
 	}
 
+	// ---- SAF-style: right after the animation update ----
+	// The Starfield Animation Framework poses bones by hooking the animation update (AnimationManager vtable slot 4,
+	// ID 467920 -> FUN_14221F170 on 1.16.244) and writing the NiNode locals as soon as it returns, before anything
+	// derives worlds or pose arrays from them. The 1st-person arm bones' locals are copied from source nodes
+	// (FUN_141A3DC50: actor +0x1040 = (src, dst) pairs, count +0x1038, skipped when +0x10CA bit 3), so the offsets go
+	// into those sources as well: whatever path the frame takes afterwards starts from our pose.
+	constexpr REL::ID kAnimationManagerVtbl{ 467920 };
+	using AnimUpdate_t = void (*)(void*, void*);
+	AnimUpdate_t         g_animUpdateOrig = nullptr;
+	std::atomic_uint32_t g_animUpdates{ 0 };
+
+	Bone g_srcBones[kBones];  // (g_armLock) source nodes of the arm bones, same fresh / written bookkeeping
+
+	// (g_armLock held) offsets into a node's local, keeping the animation's value (fresh unless it is what we wrote)
+	void ApplyOffsetTo(Bone& a_bone, int a_b, float a_w)
+	{
+		if (!a_bone.node) {
+			return;
+		}
+		const bool fresh = !a_bone.haveWritten || !SameXf(a_bone.node->local, a_bone.written);
+		if (fresh) {
+			a_bone.animLocal = a_bone.node->local;
+		}
+		if (a_w <= 0.0F) {
+			if (!fresh) {
+				a_bone.node->local = a_bone.animLocal;
+			}
+			a_bone.haveWritten = false;
+			return;
+		}
+		Xf off;
+		off.rot = g_boneRot[a_b];
+		const Mat       d = a_w >= 1.0F ? g_boneRot[a_b] : Blend(Xf{}, off, a_w).rot;
+		RE::NiTransform out = a_bone.animLocal;
+		SetMat(out.rotate, Mul(MatOf(a_bone.animLocal), d));
+		a_bone.node->local = out;
+		a_bone.written = out;
+		a_bone.haveWritten = true;
+	}
+
+	// (task) the arm bones' source nodes from the player's copy pairs
+	void FindSourceBones()
+	{
+		std::lock_guard lk(g_armLock);
+		if (g_srcBones[0].node || !g_arm.bones[0].node) {
+			return;
+		}
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			return;
+		}
+		const auto    base = reinterpret_cast<std::uintptr_t>(player);
+		std::uint32_t count = 0;
+		SafeCopy(reinterpret_cast<const void*>(base + 0x1038), &count, sizeof(count));
+		const auto pairs = ReadPtr(base + 0x1040);
+		if (!pairs || count == 0 || count > 4096) {
+			REX::INFO("arm: no source pairs on the player (count {})", count);
+			return;
+		}
+		int found = 0;
+		for (std::uint32_t k = 0; k < count; ++k) {
+			const auto src = ReadPtr(pairs + std::uintptr_t(k) * 16);
+			const auto dst = ReadPtr(pairs + std::uintptr_t(k) * 16 + 8);
+			for (int b = 0; b < kBones; ++b) {
+				if (dst && dst == reinterpret_cast<std::uintptr_t>(g_arm.bones[b].node) && src) {
+					g_srcBones[b] = {};
+					g_srcBones[b].node = reinterpret_cast<RE::NiAVObject*>(src);
+					++found;
+				}
+			}
+		}
+		REX::INFO("arm: {} of {} copy pairs feed the arm bones ({} pairs); sources {} / {} / {} / {}", found, kBones, count,
+			NameOf(g_srcBones[0].node), NameOf(g_srcBones[1].node), NameOf(g_srcBones[2].node), NameOf(g_srcBones[3].node));
+		if (!found) {
+			g_srcBones[0].node = nullptr;
+		}
+	}
+
+	void AnimUpdate_Hook(void* a_mgr, void* a_data)
+	{
+		g_animUpdateOrig(a_mgr, a_data);
+		if (!g_hookBones[0].load()) {
+			return;
+		}
+		++g_animUpdates;
+		std::lock_guard lk(g_armLock);
+		const float w = g_armWeight.load();
+		for (int b = 0; b < kBones; ++b) {
+			ApplyOffsetTo(g_srcBones[b], b, w);
+		}
+	}
+
+	void InstallAnimUpdateHook()
+	{
+		auto** vtbl = reinterpret_cast<void**>(kAnimationManagerVtbl.address());
+		std::uint32_t old = 0;
+		if (!REX::W32::VirtualProtect(&vtbl[4], sizeof(void*), REX::W32::PAGE_EXECUTE_READWRITE, &old)) {
+			REX::ERROR("arm: VirtualProtect failed (AnimationManager vtable)");
+			return;
+		}
+		g_animUpdateOrig = reinterpret_cast<AnimUpdate_t>(vtbl[4]);
+		vtbl[4] = reinterpret_cast<void*>(&AnimUpdate_Hook);
+		REX::W32::VirtualProtect(&vtbl[4], sizeof(void*), old, &old);
+		REX::INFO("arm: hooked AnimationManager::Update (vtable ID 467920 slot 4, original Starfield.exe+0x{:X})",
+			reinterpret_cast<std::uintptr_t>(g_animUpdateOrig) - (kAnimationManagerVtbl.address() - kAnimationManagerVtbl.offset()));
+	}
+
 	// ---- the reliable point: the player's 1st-person 3D update ----
 	// A hardware-watchpoint trace (bonetrace.cpp) showed the animation job writing the bones' locals and the
 	// player's 3D update FUN_141A3D8C0 (ID 102725) computing their world transforms through
@@ -1143,6 +1250,7 @@ namespace
 		}
 		g_armWeight = a_weight;
 		FindPoseComponent();
+		FindSourceBones();
 		// The skeleton root's Update (FUN_142419B00) decides EVERY FRAME whether the pose component computes the bones
 		// (update flag bit 4 + the component's own state) or plain NiNode::Update (FUN_142BD21E0) does. Sessions were
 		// seen with no component, with a component that drives the bones, and with a component that is never called.
@@ -1161,8 +1269,8 @@ namespace
 		std::lock_guard lk(g_armLock);
 		if (now >= g_arm.nextLog) {
 			g_arm.nextLog = now + std::chrono::seconds(5);
-			REX::INFO("arm: weight {:.2f}, 1st-person 3D updates {}, pose component updates {}, offset applied {} times, animation writes {}",
-				a_weight, g_update3DCalls.exchange(0), g_poseUpdates.exchange(0), g_arm.ticks, g_arm.rewritten);
+			REX::INFO("arm: weight {:.2f}, animation updates {}, 1st-person 3D updates {}, pose component updates {}, offset applied {} times, animation writes {}",
+				a_weight, g_animUpdates.exchange(0), g_update3DCalls.exchange(0), g_poseUpdates.exchange(0), g_arm.ticks, g_arm.rewritten);
 			g_arm.rewritten = g_arm.ticks = 0;
 		}
 	}
@@ -1180,6 +1288,7 @@ namespace
 		}
 		std::lock_guard lk(g_armLock);
 		g_arm = {};
+		for (auto& s : g_srcBones) s = {};
 		g_pose = {};
 		g_arr = {};
 		g_poseComp = 0;
@@ -1250,6 +1359,8 @@ namespace Tuner
 			return;
 		}
 		g_attachOrig = reinterpret_cast<Attach_t>(REL::GetTrampoline().write_call<5>(site, Attach_Hook));
+
+		InstallAnimUpdateHook();
 
 		const auto site3D = kPlayerUpdate3D.address() + kFirstPersonUpdateCall;
 		if (*reinterpret_cast<const std::uint8_t*>(site3D) == 0xE8) {
