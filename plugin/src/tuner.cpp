@@ -16,6 +16,7 @@
 #include <string>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -481,6 +482,167 @@ namespace
 		a_d.trans = Add(a_d.trans, Scale(Mul(toLocal, world), 1.0F / rootScale));
 	}
 
+
+	// ---- arm pose (experiment): rotate the 1st-person left upper arm while the Camera page is shown ----
+	// Bones are found from the phone up (PhoneAnimObjectRoot < L_AnimObject1 < L_Wrist < L_Forearm < L_Biceps), so the
+	// 3rd-person skeleton with the same names is never touched. Every tick: take the bone's local transform as the
+	// animation left it (or the copy kept from the last tick when nothing rewrote it), apply the test rotation, then
+	// recompute the world transforms of the whole subtree (arm, hand, phone) with the engine's own convention, which
+	// is detected from the existing transforms. Logged once per second.
+	struct ArmState
+	{
+		RE::NiAVObject* biceps = nullptr;
+		RE::NiTransform animLocal{};  // the animation's local transform of L_Biceps (before our rotation)
+		RE::NiTransform written{};    // what we wrote last tick
+		bool            haveWritten = false;
+		int             conv = -1;    // 0: world = parentRot * localRot (column vectors), 1: localRot * parentRot
+		int             ticks = 0, rewritten = 0;
+		std::chrono::steady_clock::time_point nextLog{};
+	} g_arm;
+
+	bool SameXf(const RE::NiTransform& a, const RE::NiTransform& b)
+	{
+		return std::memcmp(&a, &b, sizeof(RE::NiTransform)) == 0;
+	}
+
+	Mat MatOf(const RE::NiTransform& a_x) { return FromNi(a_x.rotate); }
+	void SetMat(RE::NiMatrix3& a_out, const Mat& a_m)
+	{
+		for (int i = 0; i < 3; ++i) {
+			a_out.entry[i].x = a_m[i][0];
+			a_out.entry[i].y = a_m[i][1];
+			a_out.entry[i].z = a_m[i][2];
+		}
+	}
+
+	// world of a child from its parent's world and its local transform, in convention a_conv
+	void ComposeWorld(const RE::NiTransform& a_parentWorld, const RE::NiTransform& a_local, int a_conv, RE::NiTransform& a_out)
+	{
+		const Mat   pr = MatOf(a_parentWorld), lr = MatOf(a_local);
+		const float ps = a_parentWorld.scale;
+		const Vec   lt = Scale(FromNi(a_local.translate), ps);
+		Mat         r;
+		Vec         tr;
+		if (a_conv == 0) {
+			r = Mul(pr, lr);
+			tr = Add(FromNi(a_parentWorld.translate), Mul(pr, lt));
+		} else {
+			r = Mul(lr, pr);
+			tr = Add(FromNi(a_parentWorld.translate), Mul(Transpose(pr), lt));
+		}
+		SetMat(a_out.rotate, r);
+		a_out.translate = RE::NiPoint3{ tr[0], tr[1], tr[2] };
+		a_out.scale = ps * a_local.scale;
+	}
+
+	float XfError(const RE::NiTransform& a, const RE::NiTransform& b)
+	{
+		float e = 0;
+		const Mat ma = MatOf(a), mb = MatOf(b);
+		for (int i = 0; i < 3; ++i)
+			for (int j = 0; j < 3; ++j)
+				e += std::abs(ma[i][j] - mb[i][j]);
+		e += std::abs(a.translate.x - b.translate.x) + std::abs(a.translate.y - b.translate.y) + std::abs(a.translate.z - b.translate.z);
+		return e;
+	}
+
+	void UpdateSubtreeWorld(RE::NiAVObject* a_obj, int a_conv, int a_depth = 0)
+	{
+		if (!a_obj || !a_obj->parent || a_depth > 16) {
+			return;
+		}
+		ComposeWorld(a_obj->parent->world, a_obj->local, a_conv, a_obj->world);
+		std::uint16_t count = 0;
+		auto* const*  kids = Children(a_obj, count);
+		for (std::uint16_t i = 0; kids && i < count && i < 64; ++i) {
+			UpdateSubtreeWorld(kids[i], a_conv, a_depth + 1);
+		}
+	}
+
+	// PhoneTest.ini arm_test=<degrees>,<axis 0..2> (0 degrees = off)
+	void IniArmTest(float& a_deg, int& a_axis)
+	{
+		a_deg = 30.0F;
+		a_axis = 2;
+		std::ifstream in("Data\\SFSE\\Plugins\\PhoneTest.ini");
+		std::string   line;
+		while (std::getline(in, line)) {
+			if (line.rfind("arm_test=", 0) == 0) {
+				std::sscanf(line.c_str() + 9, "%f,%d", &a_deg, &a_axis);
+			}
+		}
+		a_axis = std::clamp(a_axis, 0, 2);
+	}
+
+	void ArmTick(float a_weight)
+	{
+		if (!g_root || !g_root->parent || !g_root->parent->parent) {
+			return;
+		}
+		auto* wrist = g_root->parent->parent;  // L_AnimObject1 -> L_Wrist
+		auto* forearm = wrist->parent;
+		auto* biceps = forearm ? forearm->parent : nullptr;
+		if (!biceps || !biceps->parent) {
+			return;
+		}
+		if (biceps != g_arm.biceps) {
+			g_arm = {};
+			g_arm.biceps = biceps;
+			REX::INFO("arm: chain {} < {} < {} < {}", NameOf(wrist), NameOf(forearm), NameOf(biceps), NameOf(biceps->parent));
+		}
+		// convention, from the untouched transforms (before our first write)
+		if (g_arm.conv < 0) {
+			RE::NiTransform w0{}, w1{};
+			ComposeWorld(biceps->parent->world, biceps->local, 0, w0);
+			ComposeWorld(biceps->parent->world, biceps->local, 1, w1);
+			const float e0 = XfError(w0, biceps->world), e1 = XfError(w1, biceps->world);
+			g_arm.conv = e0 <= e1 ? 0 : 1;
+			REX::INFO("arm: world convention {} (error {:.5f} vs {:.5f})", g_arm.conv, e0, e1);
+		}
+		++g_arm.ticks;
+		const bool rewritten = !g_arm.haveWritten || !SameXf(biceps->local, g_arm.written);
+		if (rewritten) {
+			++g_arm.rewritten;
+			g_arm.animLocal = biceps->local;  // fresh from the animation
+		}
+		float deg = 0;
+		int   axis = 2;
+		static auto nextIni = std::chrono::steady_clock::now();
+		static float iniDeg = 30.0F;
+		static int   iniAxis = 2;
+		if (std::chrono::steady_clock::now() >= nextIni) {
+			nextIni = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+			IniArmTest(iniDeg, iniAxis);
+		}
+		deg = iniDeg * a_weight;
+		axis = iniAxis;
+		Vec ax{ 0, 0, 0 };
+		ax[axis] = 1;
+		RE::NiTransform out = g_arm.animLocal;
+		SetMat(out.rotate, Mul(MatOf(g_arm.animLocal), AxisAngle(ax, deg * std::numbers::pi_v<float> / 180.0F)));
+		biceps->local = out;
+		g_arm.written = out;
+		g_arm.haveWritten = true;
+		UpdateSubtreeWorld(biceps, g_arm.conv);
+
+		const auto now = std::chrono::steady_clock::now();
+		if (now >= g_arm.nextLog) {
+			g_arm.nextLog = now + std::chrono::seconds(1);
+			REX::INFO("arm: {} ticks, local rewritten by the game in {} of them; test {:.1f} deg about axis {}", g_arm.ticks,
+				g_arm.rewritten, deg, axis);
+			g_arm.ticks = g_arm.rewritten = 0;
+		}
+	}
+
+	void ArmRelease()
+	{
+		if (g_arm.biceps && g_arm.haveWritten && SameXf(g_arm.biceps->local, g_arm.written)) {
+			g_arm.biceps->local = g_arm.animLocal;  // nothing rewrote it: put the animation's value back
+			UpdateSubtreeWorld(g_arm.biceps, g_arm.conv);
+		}
+		g_arm = {};
+	}
+
 	constexpr std::array<int, 16> kKeys{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6D, 0x6E, 0x6F, 0 };
 }
 
@@ -546,6 +708,7 @@ namespace Tuner
 			}
 			g_applied = Mode::kNone;
 			weight = 0.0F;
+			g_arm = {};
 			return;
 		}
 		weight = a_camera ? std::min(1.0F, weight + dt / kBlendTime) : std::max(0.0F, weight - dt / kBlendTime);
@@ -606,5 +769,10 @@ namespace Tuner
 			Apply(use, g_orig[i], g_children[i]->local);
 		}
 		g_applied = mode;
+		if (weight > 0.0F) {
+			ArmTick(s);
+		} else if (g_arm.biceps) {
+			ArmRelease();
+		}
 	}
 }
