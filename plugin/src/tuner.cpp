@@ -447,6 +447,24 @@ namespace
 		g_d.trans = Add(Mul(rl, Sub(g_d.trans, c)), c);
 	}
 
+	// a + (b - a) * w for both parts; the rotation is re-orthonormalised (Gram-Schmidt on the rows)
+	Xf Blend(const Xf& a_a, const Xf& a_b, float a_w)
+	{
+		Xf r;
+		for (int i = 0; i < 3; ++i) {
+			r.trans[i] = a_a.trans[i] + (a_b.trans[i] - a_a.trans[i]) * a_w;
+			for (int j = 0; j < 3; ++j) {
+				r.rot[i][j] = a_a.rot[i][j] + (a_b.rot[i][j] - a_a.rot[i][j]) * a_w;
+			}
+		}
+		Vec x{ r.rot[0][0], r.rot[0][1], r.rot[0][2] }, y{ r.rot[1][0], r.rot[1][1], r.rot[1][2] };
+		x = Norm(x);
+		y = Norm(Sub(y, Scale(x, Dot(x, y))));
+		const Vec z = Cross(x, y);
+		r.rot = { { { x[0], x[1], x[2] }, { y[0], y[1], y[2] }, { z[0], z[1], z[2] } } };
+		return r;
+	}
+
 	// move a pose by a camera-relative offset (right, up, forward), the way the numpad does
 	void MoveCameraSpace(Xf& a_d, float a_right, float a_up, float a_fwd)
 	{
@@ -516,14 +534,22 @@ namespace Tuner
 	void Tick(bool a_isOpen, bool a_keys, bool a_camera)
 	{
 		const auto now = std::chrono::steady_clock::now();
+		// weight of the camera pose: eases in / out over kBlendTime instead of jumping
+		constexpr float kBlendTime = 0.35F;
+		static float    weight = 0.0F;
+		static auto     last = now;
+		const float     dt = std::min(0.1F, std::chrono::duration<float>(now - last).count());
+		last = now;
 		if (!a_isOpen) {
 			if (g_root) {
 				Release();
 			}
 			g_applied = Mode::kNone;
+			weight = 0.0F;
 			return;
 		}
-		const Mode mode = a_camera ? Mode::kCamera : (a_keys ? Mode::kNormal : Mode::kNone);
+		weight = a_camera ? std::min(1.0F, weight + dt / kBlendTime) : std::max(0.0F, weight - dt / kBlendTime);
+		const Mode mode = (a_camera || weight > 0.0F) ? Mode::kCamera : (a_keys ? Mode::kNormal : Mode::kNone);
 		if (mode == Mode::kNone && g_applied == Mode::kNone) {
 			return;  // baked placement, nothing to do
 		}
@@ -545,7 +571,8 @@ namespace Tuner
 				REX::INFO("tuner: camera pose default (tune with the numpad on the Camera page, 5 saves)");
 			}
 		}
-		Xf* active = mode == Mode::kCamera ? &g_cam : mode == Mode::kNormal ? &g_d : nullptr;
+		// the numpad tunes the camera pose only while the Camera page is shown (fully blended in)
+		Xf* active = a_camera ? &g_cam : a_keys ? &g_d : nullptr;
 
 		// keys (dev_keys only): act on press, then repeat every 60 ms while held
 		if (a_keys && active) {
@@ -560,7 +587,7 @@ namespace Tuner
 				if (vk == 0x60) {  // 0 reset
 					if (pressed) { *active = Xf{}; REX::INFO("tuner: reset"); }
 				} else if (vk == 0x65) {  // 5 save
-					if (pressed) Save(*active, mode == Mode::kCamera ? kCameraSavePath : kSavePath);
+					if (pressed) Save(*active, a_camera ? kCameraSavePath : kSavePath);
 				} else if (vk == 0x6E) {  // . fine / coarse
 					if (pressed) { g_fine = !g_fine; REX::INFO("tuner: {} steps", g_fine ? "fine" : "coarse"); }
 				} else if (pressed || now >= g_nextRepeat) {
@@ -572,8 +599,9 @@ namespace Tuner
 			}
 		}
 
-		const Xf  identity{};
-		const Xf& use = active ? *active : identity;
+		const Xf    base = a_keys ? g_d : Xf{};
+		const float s = weight * weight * (3.0F - 2.0F * weight);  // smoothstep
+		const Xf    use = s >= 1.0F ? g_cam : s <= 0.0F ? base : Blend(base, g_cam, s);
 		for (std::size_t i = 0; i < g_children.size(); ++i) {
 			Apply(use, g_orig[i], g_children[i]->local);
 		}
