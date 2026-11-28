@@ -807,6 +807,95 @@ namespace
 		}
 	}
 
+	// ---- the window that works: right after the skeleton's pose component update ----
+	// Inside the 1st-person update, the skeleton root's Update (FUN_142419B00) calls its pose component's vtable
+	// +0x10 (FUN_14064E750 -> FUN_142BE93F0), which writes every bone's world transform from the pose arrays, and
+	// then FUN_14241AB80, which hands the transforms to the renderer (render-instance tables). Writes before the
+	// component call are overwritten, writes after FUN_14241AB80 come a frame late; the in-game tuning session only
+	// worked because the task happened to land in between. So: hook the component's +0x10 and override the arm
+	// there, right after it returns: offsets into the locals, arm subtree worlds recomputed (convention 1).
+	using PoseUpdate_t = std::uintptr_t (*)(void*, void*, void*, void*);
+	struct CompHook
+	{
+		void**       vtbl = nullptr;
+		PoseUpdate_t orig = nullptr;
+	};
+	CompHook                   g_compHooks[4];
+	std::atomic<std::uintptr_t> g_poseComp{ 0 };
+	std::atomic_uint32_t       g_poseUpdates{ 0 };
+
+	std::uintptr_t PoseUpdate_Hook(void* a_comp, void* a_2, void* a_3, void* a_4)
+	{
+		PoseUpdate_t orig = nullptr;
+		void** const vtbl = *reinterpret_cast<void***>(a_comp);
+		for (const auto& h : g_compHooks) {
+			if (h.vtbl == vtbl) {
+				orig = h.orig;
+				break;
+			}
+		}
+		const std::uintptr_t r = orig ? orig(a_comp, a_2, a_3, a_4) : 0;
+		if (reinterpret_cast<std::uintptr_t>(a_comp) == g_poseComp.load() && g_hookBones[0].load()) {
+			++g_poseUpdates;
+			for (int b = 0; b < kBones; ++b) {
+				ApplyBoneOffset(b);
+			}
+			if (g_armWeight.load() > 0.0F || g_arm.bones[0].haveWritten) {
+				auto* top = g_hookBones[0].load();
+				UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
+			}
+		}
+		return r;
+	}
+
+	// (task) the pose component of the arm's skeleton: the first ancestor of the clavicle whose +0x180 object has a
+	// plausible pose block; hook its class's +0x10 once
+	void FindPoseComponent()
+	{
+		if (g_poseComp.load() || !g_arm.bones[0].node) {
+			return;
+		}
+		int depth = 0;
+		for (auto* n = g_arm.bones[0].node->parent; n && depth < 16; n = n->parent, ++depth) {
+			const auto    comp = ReadPtr(reinterpret_cast<std::uintptr_t>(n) + 0x180);
+			const auto    block = comp ? ReadPtr(comp + 0x10) : 0;
+			const auto    locals = block ? ReadPtr(ReadPtr(block + 0x08) + 0x10) : 0;
+			std::uint16_t count = 0;
+			if (comp) SafeCopy(reinterpret_cast<const void*>(comp + 0x78), &count, sizeof(count));
+			if (!locals || count < 8 || count > 1024) {
+				continue;
+			}
+			void** const vtbl = *reinterpret_cast<void***>(comp);
+			bool         hooked = false;
+			for (auto& h : g_compHooks) {
+				if (h.vtbl == vtbl) {
+					hooked = true;
+					break;
+				}
+			}
+			for (auto& h : g_compHooks) {
+				if (hooked) break;
+				if (!h.vtbl) {
+					std::uint32_t old = 0;
+					if (!REX::W32::VirtualProtect(&vtbl[2], sizeof(void*), REX::W32::PAGE_EXECUTE_READWRITE, &old)) {
+						REX::ERROR("arm: VirtualProtect failed");
+						return;
+					}
+					h.orig = reinterpret_cast<PoseUpdate_t>(vtbl[2]);
+					h.vtbl = vtbl;
+					vtbl[2] = reinterpret_cast<void*>(&PoseUpdate_Hook);
+					REX::W32::VirtualProtect(&vtbl[2], sizeof(void*), old, &old);
+					hooked = true;
+				}
+			}
+			g_poseComp = comp;
+			REX::INFO("arm: pose component {:X} on '{}' ({} bones), vtable {:X} +0x10 hooked", comp, NameOf(n), count,
+				reinterpret_cast<std::uintptr_t>(vtbl));
+			return;
+		}
+		REX::WARN("arm: no pose component above the clavicle");
+	}
+
 	// ---- the reliable point: the player's 1st-person 3D update ----
 	// A hardware-watchpoint trace (bonetrace.cpp) showed the animation job writing the bones' locals and the
 	// player's 3D update FUN_141A3D8C0 (ID 102725) computing their world transforms through
@@ -821,21 +910,10 @@ namespace
 
 	void Update3D_Hook(void* a_actor, float a_dt, void* a_root, void* a_camera, char a_first, char a_flag, std::uint8_t a_p7)
 	{
-		g_update3DOrig(a_actor, a_dt, a_root, a_camera, a_first, a_flag, a_p7);
-		// After the call: it has just written the 1st-person bones' world transforms from the skeleton's pose
-		// arrays (FUN_142BE93F0, traced). Override them the way the in-game tuning session did (and saw working):
-		// offsets into the locals, then the arm subtree's world transforms recomputed (convention 1 =
-		// localRot * parentRot, measured with zero error). Rendering reads the worlds after this.
-		if (a_first && g_hookBones[0].load()) {
+		if (a_first) {
 			++g_update3DCalls;
-			for (int b = 0; b < kBones; ++b) {
-				ApplyBoneOffset(b);
-			}
-			if (g_armWeight.load() > 0.0F || g_arm.bones[0].haveWritten) {
-				auto* top = g_hookBones[0].load();
-				UpdateSubtreeWorld(top, 1, *reinterpret_cast<void* const*>(top));
-			}
 		}
+		g_update3DOrig(a_actor, a_dt, a_root, a_camera, a_first, a_flag, a_p7);
 	}
 
 	// task side: find the bones, publish them and the blend weight
@@ -851,13 +929,14 @@ namespace
 			g_hookBones[b] = g_arm.bones[b].node;
 		}
 		g_armWeight = a_weight;
+		FindPoseComponent();
 
 		const auto now = std::chrono::steady_clock::now();
 		std::lock_guard lk(g_armLock);
 		if (now >= g_arm.nextLog) {
 			g_arm.nextLog = now + std::chrono::seconds(5);
-			REX::INFO("arm: weight {:.2f}, 1st-person 3D updates {}, upper arm offset applied {} times, animation writes {}", a_weight,
-				g_update3DCalls.exchange(0), g_arm.ticks, g_arm.rewritten);
+			REX::INFO("arm: weight {:.2f}, 1st-person 3D updates {}, pose component updates {}, offset applied {} times, animation writes {}",
+				a_weight, g_update3DCalls.exchange(0), g_poseUpdates.exchange(0), g_arm.ticks, g_arm.rewritten);
 			g_arm.rewritten = g_arm.ticks = 0;
 		}
 	}
@@ -876,6 +955,7 @@ namespace
 		std::lock_guard lk(g_armLock);
 		g_arm = {};
 		g_pose = {};
+		g_poseComp = 0;
 	}
 
 	// numpad on a bone: rotate about the bone's own axes (pairs: 8/2 4/6 7/9 and 1/3 / * - +)
