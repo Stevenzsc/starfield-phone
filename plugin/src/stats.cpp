@@ -315,6 +315,8 @@ namespace
 	constexpr REL::ID kIsHostile{ 116842 };
 	constexpr REL::ID kExecuteConsole{ 117306 };
 	constexpr REL::ID kNotification{ 117311 };
+	constexpr REL::ID kPlayMenuSound{ 114814 };   // WwiseEvent.PlayMenuSound(string) global, Starfield.exe+0x1F0AB40
+	constexpr REL::ID kShakeController{ 117449 }; // Game.ShakeController(float, float, float), Starfield.exe+0x200FCA0
 	constexpr REL::ID kAllForms{ 883341 };
 
 	constexpr std::uint32_t kBeaconBase = 0x002C60E9;
@@ -643,6 +645,20 @@ namespace Stats
 	}
 
 	void HudNotify(const std::string& a_utf8) { RunNative(kNotification, a_utf8); }
+
+	// The native returns early while the audio system is not up, and only touches the VM argument to log an empty
+	// name, so callers must pass a non-empty ID.
+	void PlayUiSound(const char* a_id)
+	{
+		if (a_id && *a_id) RunNative(kPlayMenuSound, a_id);
+	}
+
+	// the native clamps both strengths to 0..1 and starts both motors (small = high frequency)
+	void Rumble(float a_small, float a_big, float a_seconds)
+	{
+		using fn_t = void (*)(void*, std::uint32_t, void*, float, float, float);
+		reinterpret_cast<fn_t>(kShakeController.address())(nullptr, 0, nullptr, a_small, a_big, a_seconds);
+	}
 }
 
 // ---- photo mode shutter ----

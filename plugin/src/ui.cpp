@@ -8,6 +8,7 @@
 
 #include "ui.h"
 #include "gallery.h"
+#include "music.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #if __has_include(<stb_truetype.h>)
@@ -377,6 +378,7 @@ namespace
 		{ "日历", "历", 0xE787 },    // Calendar
 		{ "相机", "相", 0xE722 },    // Camera
 		{ "相册", "册", 0xE8B9 },    // Picture
+		{ "音乐", "乐", 0xE8D6 },    // Audio
 		{ "联系人", "人", 0xE716 },  // People
 		{ "前哨站", "哨", 0xE80F },  // Home
 		{ "扫描仪", "扫", 0xE721 },  // Search
@@ -392,6 +394,7 @@ namespace
 		kAppCalendar,
 		kAppCamera,
 		kAppGallery,
+		kAppMusic,
 		kAppContacts,
 		kAppOutposts,
 		kAppScanner,
@@ -411,8 +414,11 @@ namespace
 		int setSel = 0;    // selected row in Settings
 		int openedApp = 0; // app whose page is shown (for placeholder titles)
 		// settings
-		int brightness = 100;
-		int openKey = 0;
+		int  brightness = 100;
+		int  openKey = 0;
+		bool sound = true;
+		bool vibration = true;
+		int  musicVolume = 60;
 		// quests
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
 		int detailScroll = 0; // first objective row on the quest details page
@@ -448,6 +454,7 @@ namespace
 		kContactsPage,
 		kCallPage,
 		kRadarPage,
+		kMusicPage,
 	};
 
 	constexpr float kRadarRanges[] = { 25.0f, 50.0f, 100.0f, 200.0f };
@@ -467,6 +474,7 @@ namespace
 		case kAppCalendar: return kCalendarPage;
 		case kAppCamera: return kCameraPage;
 		case kAppGallery: return kGalleryPage;
+		case kAppMusic: return kMusicPage;
 		case kAppSettings: return kSettingsPage;
 		default: return kPlaceholderPage;
 		}
@@ -492,7 +500,7 @@ namespace
 	constexpr OpenKey kOpenKeys[] = {
 		{ 0x76, "F7" }, { 0x75, "F6" }, { 0x79, "F10" }, { 0x2D, "Insert" }, { 0x24, "Home" }, { 0x23, "End" },
 	};
-	constexpr int kSettingsRows = 2;  // brightness, open key
+	constexpr int kSettingsRows = 4;  // brightness, open key, button sounds, rumble
 
 	std::mutex g_lock;
 	State      g_state;     // latest values (guarded)
@@ -688,6 +696,94 @@ namespace
 		}
 	}
 
+	// ---- selection box: slides to the new item with a little overshoot ----
+	// Pages with a white selection block draw it through SelBox before their items, and colour each item by Covered
+	// (dark text where the box is). While the box moves, Render redraws the page every frame (g_selMoving).
+	struct FRect
+	{
+		float x = 0, y = 0, w = 0, h = 0;
+	};
+	struct SelAnim
+	{
+		int                                   page = -1;
+		FRect                                 from, to;
+		std::chrono::steady_clock::time_point start{};
+		bool                                  active = false;
+	};
+	SelAnim         g_sel;
+	bool            g_selMoving = false;  // set by the last draw: the box is still moving
+	constexpr float kSelSeconds = 0.26f;
+
+	FRect ToF(const IRect& r) { return { float(r.x), float(r.y), float(r.w), float(r.h) }; }
+
+	FRect SelBox(int a_page, const IRect& a_target)
+	{
+		const auto  now = std::chrono::steady_clock::now();
+		const FRect target = ToF(a_target);
+		if (g_sel.page != a_page) {
+			g_sel = { a_page, target, target, now, false };
+			return target;
+		}
+		auto current = [&]() -> FRect {
+			if (!g_sel.active) return g_sel.to;
+			const float t = std::chrono::duration<float>(now - g_sel.start).count() / kSelSeconds;
+			if (t >= 1.0f) {
+				g_sel.active = false;
+				return g_sel.to;
+			}
+			const float e = SpringBouncy(t);
+			const auto& a = g_sel.from;
+			const auto& b = g_sel.to;
+			return { a.x + (b.x - a.x) * e, a.y + (b.y - a.y) * e, a.w + (b.w - a.w) * e, a.h + (b.h - a.h) * e };
+		};
+		const FRect cur = current();
+		if (target.x != g_sel.to.x || target.y != g_sel.to.y || target.w != g_sel.to.w || target.h != g_sel.to.h) {
+			g_sel.from = cur;
+			g_sel.to = target;
+			g_sel.start = now;
+			g_sel.active = true;
+		}
+		g_selMoving = g_selMoving || g_sel.active;
+		return cur;
+	}
+
+	// the box covers most of the item: draw it in the selected colours
+	bool Covered(const FRect& a_box, int x, int y, int w, int h)
+	{
+		const float ix = std::max(0.0f, std::min(a_box.x + a_box.w, float(x + w)) - std::max(a_box.x, float(x)));
+		const float iy = std::max(0.0f, std::min(a_box.y + a_box.h, float(y + h)) - std::max(a_box.y, float(y)));
+		return w > 0 && h > 0 && ix * iy > 0.5f * float(w) * float(h);
+	}
+
+	// ---- smooth scrolling ----
+	// List pages report their list area and the top y of every item they draw (RowMark). When the first item changes
+	// between two draws of the same page, Render slides from the old frame to the new one by the distance a common item
+	// moved (Compose), so a one-row step scrolls instead of jumping.
+	struct Rows
+	{
+		int                              page = -1;
+		int                              top = 0, bottom = 0;
+		std::vector<std::pair<int, int>> items;  // (index, top y)
+	};
+	Rows g_rows;
+	struct ScrollAnim
+	{
+		bool                                  active = false;
+		int                                   top = 0, bottom = 0;
+		float                                 d = 0;  // old y - new y of the same item
+		std::chrono::steady_clock::time_point start{};
+	};
+	ScrollAnim      g_scroll;
+	Canvas          g_scrollFrom;
+	constexpr float kScrollSeconds = 0.3f;
+
+	void ListArea(int a_top, int a_bottom)
+	{
+		g_rows.top = a_top;
+		g_rows.bottom = a_bottom;
+	}
+	void RowMark(int a_index, int a_y) { g_rows.items.emplace_back(a_index, a_y); }
+
 	// ---- shared chrome ----
 	int Pad(const Canvas& c) { return int(c.w * 0.05f); }
 
@@ -708,13 +804,21 @@ namespace
 		char        clock[16];
 		ClockText(s, clock);
 		Text(c, pad, y, clock, f, kText);
+		int afterClock = pad + TextWidth(clock, f) + int(f * 0.6f);
 		if (g_unread > 0) {  // unread messages: envelope + count after the clock
 			const int mx = pad + TextWidth(clock, f) + int(f * 0.6f);
+			char      cnt[8];
+			std::snprintf(cnt, sizeof(cnt), "%d", std::min(g_unread, 99));
+			afterClock = mx + int(f * 0.66f * 1.35f) + int(f * 0.25f) + TextWidth(cnt, f * 0.85f) + int(f * 0.6f);
 			const int my = y + int(f * 0.2f), mh = int(f * 0.66f), mw = int(mh * 1.35f);
 			Rect(c, mx, my, mw, mh, kGold);
 			char n[8];
 			std::snprintf(n, sizeof(n), "%d", std::min(g_unread, 99));
 			Text(c, mx + mw + int(f * 0.25f), y + int(f * 0.06f), n, f * 0.85f, kGold);
+		}
+		if (const auto ms = Music::Get(); ms.playing && ms.index >= 0) {  // music playing: a note after the clock
+			if (HasIcon(0xE8D6)) Icon(c, afterClock + int(f * 0.4f), y + int(f * 0.55f), 0xE8D6, f * 0.8f, kText);
+			else Text(c, afterClock, y, "♪", f, kText);
 		}
 
 		const int bh = int(f * 0.62f), bw = int(bh * 2.1f);
@@ -818,20 +922,22 @@ namespace
 		const int   tile = std::max(16, std::min(byWidth, byHeight));
 		const int   gridW = cols * tile + (cols - 1) * gapX;
 		const int   gx = (c.w - gridW) / 2;
+		// tiles first, then the (moving) selection box over them, then icons and labels
+		for (std::size_t i = 0; i < std::size(kApps); ++i) {
+			const int col = int(i) % cols, row = int(i) / cols;
+			const int x = gx + col * (tile + gapX);
+			const int y = gridTop + row * (tile + labelH + gapY);
+			g_tiles[i] = { x, y, tile, tile };
+			Rect(c, x, y, tile, tile, kPanel, 0.9f);
+			Frame(c, x, y, tile, tile, 1, kLine);
+		}
+		const FRect box = SelBox(kHome, g_tiles[std::clamp(s.homeSel, 0, int(std::size(kApps)) - 1)]);
+		Rect(c, int(std::lround(box.x)), int(std::lround(box.y)), int(std::lround(box.w)), int(std::lround(box.h)), kSelBg);
 		for (std::size_t i = 0; i < std::size(kApps); ++i) {
 			const auto& a = kApps[i];
-			const int   col = int(i) % cols, row = int(i) / cols;
-			const int   x = gx + col * (tile + gapX);
-			const int   y = gridTop + row * (tile + labelH + gapY);
-			const bool  sel = int(i) == s.homeSel;
-			g_tiles[i] = { x, y, tile, tile };
-			if (sel) {
-				Rect(c, x, y, tile, tile, kSelBg);
-			} else {
-				Rect(c, x, y, tile, tile, kPanel, 0.9f);
-				Frame(c, x, y, tile, tile, 1, kLine);
-			}
-			const Rgb fg = sel ? kSelText : kText;
+			const int   x = g_tiles[i].x, y = g_tiles[i].y;
+			const bool  sel = Covered(box, x, y, tile, tile);
+			const Rgb   fg = sel ? kSelText : kText;
 			if (HasIcon(a.icon)) {
 				Icon(c, x + tile / 2, y + tile / 2, a.icon, tile * 0.42f, fg);
 			} else {
@@ -859,17 +965,19 @@ namespace
 		const float f = std::max(13.0f, H * 0.044f);
 		char        bright[16];
 		std::snprintf(bright, sizeof(bright), "%d%%", s.brightness);
-		const char* labels[kSettingsRows] = { "屏幕亮度", "打开手机" };
-		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name };
+		const char* labels[kSettingsRows] = { "屏幕亮度", "打开手机", "按键音效", "手柄震动" };
+		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name, s.sound ? "开" : "关", s.vibration ? "开" : "关" };
+		const FRect box = SelBox(kSettingsPage, { pad, y + s.setSel * rowH, c.w - 2 * pad, rowH - 2 });
 		for (int i = 0; i < kSettingsRows; ++i) {
-			const bool sel = i == s.setSel;
-			const int  ty = y + rowH / 2 - int(f * 0.62f);
-			if (sel) {
-				Rect(c, pad, y, c.w - 2 * pad, rowH - 2, kSelBg);
-			} else {
-				Rect(c, pad, y + rowH - 2, c.w - 2 * pad, 1, kLine, 0.7f);
+			if (!Covered(box, pad, y + i * rowH, c.w - 2 * pad, rowH - 2)) {
+				Rect(c, pad, y + i * rowH + rowH - 2, c.w - 2 * pad, 1, kLine, 0.7f);
 			}
-			const Rgb fg = sel ? kSelText : kText;
+		}
+		Rect(c, int(std::lround(box.x)), int(std::lround(box.y)), int(std::lround(box.w)), int(std::lround(box.h)), kSelBg);
+		for (int i = 0; i < kSettingsRows; ++i) {
+			const bool sel = Covered(box, pad, y, c.w - 2 * pad, rowH - 2);
+			const int  ty = y + rowH / 2 - int(f * 0.62f);
+			const Rgb  fg = sel ? kSelText : kText;
 			Text(c, pad + int(W * 0.03f), ty, labels[i], f, fg);
 			char val[40];
 			std::snprintf(val, sizeof(val), sel ? "‹  %s  ›" : "%s", values[i]);
@@ -999,14 +1107,16 @@ namespace
 		// keep the selection visible
 		const int visible = std::max(1, (limit - y) / rowH);
 		const int first = std::clamp(sel - visible + 1, 0, std::max(0, n - visible));
+		ListArea(y, limit + 2);
+		const FRect box = SelBox(kGalleryPage, { pad, y + (sel - first) * rowH, c.w - 2 * pad, rowH - 4 });
+		for (int i = first, yy = y; i < n && yy + rowH <= limit + 2; ++i, yy += rowH) {
+			if (!Covered(box, pad, yy, c.w - 2 * pad, rowH - 4)) Rect(c, pad, yy + rowH - 3, c.w - 2 * pad, 1, kLine, 0.7f);
+		}
+		Rect(c, int(std::lround(box.x)), int(std::lround(box.y)), int(std::lround(box.w)), int(std::lround(box.h)), kSelBg);
 		for (int i = first; i < n && y + rowH <= limit + 2; ++i) {
 			const auto& a = g_albums[i];
-			const bool  on = i == sel;
-			if (on) {
-				Rect(c, pad, y, c.w - 2 * pad, rowH - 4, kSelBg);
-			} else {
-				Rect(c, pad, y + rowH - 3, c.w - 2 * pad, 1, kLine, 0.7f);
-			}
+			const bool  on = Covered(box, pad, y, c.w - 2 * pad, rowH - 4);
+			RowMark(i, y);
 			const Rgb fg = on ? kSelText : kText, dim = on ? Rgb{ 70, 76, 84 } : kDim;
 			// pin mark for place albums
 			const bool place = i > 0 && a.title != "未知位置";
@@ -1144,8 +1254,10 @@ namespace
 		const int limit = bottom - int(H * 0.01f);
 		const int inner = int(W * 0.025f);  // text inset inside the selection block
 		int       shown = 0;
+		ListArea(y - int(H * 0.008f), limit + int(H * 0.008f));
 		for (int i = first; i < int(g_quests.size()); ++i) {
 			const auto& q = g_quests[i];
+			RowMark(i, y);
 			// section header at the top of the page and wherever the quest type changes
 			if (!q.group.empty() && (i == first || q.group != g_quests[i - 1].group)) {
 				if (shown > 0 && y + int(objF * 1.8f) + int(nameF * 1.3f) > limit) {
@@ -1226,8 +1338,10 @@ namespace
 		const int limit = bottom - int(H * 0.01f);
 		const int indent = int(objF * 1.6f);
 		const int n = int(q.details.size());
+		ListArea(y, limit);
 		for (int i = std::clamp(s.detailScroll, 0, std::max(0, n - 1)); i < n; ++i) {
 			const auto& o = q.details[i];
+			RowMark(i, y);
 			if (y + int(objF * 1.3f) > limit) break;
 			const Rgb col = o.state == 1 ? kText : (o.state == 2 ? kDim : kWarn);
 			const int ms = int(objF * 0.6f), mx = pad + int(objF * 0.2f), my = y + int(objF * 0.35f);
@@ -1268,8 +1382,10 @@ namespace
 		const int inner = int(W * 0.02f);
 		const int barH = std::max(3, int(H * 0.008f));
 		const int n = int(g_infoRows.size());
+		ListArea(y, limit);
 		for (int i = std::clamp(s.infoScroll, 0, n - 1); i < n; ++i) {
 			const auto& r = g_infoRows[i];
+			RowMark(i, y);
 			if (r.header) {
 				if (y + int(f * 1.7f) > limit) break;
 				y += int(f * 0.3f);
@@ -1399,8 +1515,10 @@ namespace
 		const int inner = int(W * 0.03f);
 		const int gap = int(H * 0.015f);
 		int       shown = 0;
+		ListArea(y, limit);
 		for (int i = std::clamp(s.msgScroll, 0, n - 1); i < n; ++i) {
 			const auto& m = g_messages[i];
+			RowMark(i, y);
 			const auto  lines = Wrap(m.text, textF, c.w - 2 * pad - 2 * inner);
 			const int   h = int(titleF * 1.7f) + int(textF * 1.3f) * int(lines.size()) + int(textF * 0.5f);
 			if (shown > 0 && y + h > limit) break;
@@ -1489,11 +1607,16 @@ namespace
 		const int sel = std::clamp(s.contactSel, 0, n - 1);
 		const int visible = std::max(1, (limit - y) / rowH);
 		const int first = std::clamp(sel - visible + 1, 0, std::max(0, n - visible));
+		ListArea(y, limit + 2);
+		const FRect box = SelBox(kContactsPage, { pad, y + (sel - first) * rowH, c.w - 2 * pad, rowH - 4 });
+		for (int i = first, yy = y; i < n && yy + rowH <= limit + 2; ++i, yy += rowH) {
+			if (!Covered(box, pad, yy, c.w - 2 * pad, rowH - 4)) Rect(c, pad, yy + rowH - 3, c.w - 2 * pad, 1, kLine, 0.7f);
+		}
+		Rect(c, int(std::lround(box.x)), int(std::lround(box.y)), int(std::lround(box.w)), int(std::lround(box.h)), kSelBg);
 		for (int i = first; i < n && y + rowH <= limit + 2; ++i) {
 			const auto& ct = g_contacts[i];
-			const bool  on = i == sel;
-			if (on) Rect(c, pad, y, c.w - 2 * pad, rowH - 4, kSelBg);
-			else Rect(c, pad, y + rowH - 3, c.w - 2 * pad, 1, kLine, 0.7f);
+			const bool  on = Covered(box, pad, y, c.w - 2 * pad, rowH - 4);
+			RowMark(i, y);
 			const Rgb fg = on ? kSelText : kText, dim = on ? Rgb{ 70, 76, 84 } : kDim;
 			const int ax = pad + inner, ay = y + (rowH - 4 - av) / 2;
 			Disc(c, ax + av / 2.0f, ay + av / 2.0f, av / 2.0f, ct.dead ? kDim : (ct.distance >= 0 ? kStripe[3] : kPanel));
@@ -1597,6 +1720,112 @@ namespace
 		}
 	}
 
+	std::string MinSec(int a_ms)
+	{
+		char      buf[16];
+		const int s = std::max(0, a_ms) / 1000;
+		std::snprintf(buf, sizeof(buf), "%d:%02d", s / 60, s % 60);
+		return buf;
+	}
+
+	// Music app: cover, title, progress, transport controls, volume, the next tracks
+	void DrawMusic(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const auto  m = Music::Get();
+		const int   n = int(m.titles.size());
+		const bool  playing = m.playing && m.index >= 0;
+		const int   bottom = n ? Prompts(c, { { "←→", "切歌" }, { "Enter", playing ? "暂停" : "播放" }, { "↑↓", "音量" }, { "退格", "返回" } }) :
+		                         Prompts(c, { { "退格", "返回" } });
+		char        note[32] = "";
+		if (n) std::snprintf(note, sizeof(note), "%d / %d", std::max(0, m.index) + 1, n);
+		int         y = Header(c, a_y, "音乐", n ? note : nullptr);
+		const float f = std::max(13.0f, H * 0.042f), sf = f * 0.8f;
+		if (!n) {
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有音乐", std::max(16.0f, H * 0.05f), kText);
+			int ty = y + int(H * 0.1f) + int(H * 0.08f);
+			for (const auto& l : Wrap("把 mp3 / wav / wma 文件放进这个文件夹，再打开音乐：", sf, c.w - 2 * pad)) {
+				TextCentered(c, c.w / 2, ty, l.c_str(), sf, kDim);
+				ty += int(sf * 1.4f);
+			}
+			ty += int(sf * 0.4f);
+			for (const auto& l : Wrap(m.folder.empty() ? "文档\\My Games\\Starfield\\PhoneMusic" : m.folder, sf * 0.9f, c.w - 2 * pad)) {
+				TextCentered(c, c.w / 2, ty, l.c_str(), sf * 0.9f, kStripe[1]);
+				ty += int(sf * 1.3f);
+			}
+			return;
+		}
+		// cover: dark panel, frame, big note, the stripe badge in a corner
+		const int side = int(std::min(W * 0.56f, (bottom - y) * 0.42f));
+		const int cx0 = (c.w - side) / 2, cy0 = y + int(H * 0.005f);
+		Rect(c, cx0, cy0, side, side, kPanel, 0.95f);
+		Frame(c, cx0, cy0, side, side, 1, kLine);
+		if (HasIcon(0xE8D6)) Icon(c, cx0 + side / 2, cy0 + side / 2, 0xE8D6, side * 0.38f, playing ? kText : kDim);
+		else TextCentered(c, cx0 + side / 2, cy0 + side / 2 - int(side * 0.2f), "乐", side * 0.36f, playing ? kText : kDim);
+		const int bw = std::max(3, side / 40), gap = std::max(2, bw / 2);
+		Stripes(c, cx0 + side / 14, cy0 + side - side / 14 - side / 5, bw, side / 5, gap);
+		y = cy0 + side + int(H * 0.025f);
+		// title and state
+		const std::string title = m.index >= 0 ? m.titles[m.index] : m.titles[0];
+		TextCentered(c, c.w / 2, y, Fit(title, f * 1.1f, c.w - 2 * pad).c_str(), f * 1.1f, kText);
+		y += int(f * 1.55f);
+		const std::string state = !m.error.empty() ? m.error : m.index < 0 ? "未播放" : playing ? "正在播放" : "已暂停";
+		TextCentered(c, c.w / 2, y, Fit(state, sf, c.w - 2 * pad).c_str(), sf, !m.error.empty() ? kWarn : playing ? kStripe[1] : kDim);
+		y += int(sf * 1.8f);
+		// progress
+		const int barH = std::max(3, int(H * 0.007f));
+		Rect(c, pad, y, c.w - 2 * pad, barH, kPanel);
+		if (m.lenMs > 0) {
+			Rect(c, pad, y, int((c.w - 2 * pad) * std::clamp(float(m.posMs) / float(m.lenMs), 0.0f, 1.0f)), barH, kText);
+		}
+		y += barH + int(sf * 0.4f);
+		const auto pos = MinSec(m.posMs), len = MinSec(m.lenMs);
+		Text(c, pad, y, pos.c_str(), sf, kDim);
+		Text(c, c.w - pad - TextWidth(len.c_str(), sf), y, len.c_str(), sf, kDim);
+		y += int(sf * 1.6f);
+		// transport: previous, play / pause (white block like a selection), next
+		const int bs = int(std::min(W * 0.18f, H * 0.075f));
+		const int mid = c.w / 2;
+		const int by = y;
+		Rect(c, mid - bs / 2, by, bs, bs, kSelBg);
+		const int playIcon = playing ? 0xE769 : 0xE768;
+		if (HasIcon(playIcon)) Icon(c, mid, by + bs / 2, playIcon, bs * 0.5f, kSelText);
+		else TextCentered(c, mid, by + int(bs * 0.2f), playing ? "停" : "播", bs * 0.5f, kSelText);
+		const int side2 = int(bs * 1.6f);
+		for (int k = 0; k < 2; ++k) {
+			const int ccx = k == 0 ? mid - side2 : mid + side2;
+			Frame(c, ccx - bs / 2, by, bs, bs, 1, kLine);
+			const int ic = k == 0 ? 0xE892 : 0xE893;
+			if (HasIcon(ic)) Icon(c, ccx, by + bs / 2, ic, bs * 0.42f, kText);
+			else TextCentered(c, ccx, by + int(bs * 0.2f), k == 0 ? "‹" : "›", bs * 0.5f, kText);
+		}
+		y = by + bs + int(H * 0.025f);
+		// volume
+		char vol[16];
+		std::snprintf(vol, sizeof(vol), "音量 %d%%", m.volume);
+		Text(c, pad, y, vol, sf, kDim);
+		const int vx = pad + TextWidth("音量 100%", sf) + int(sf);
+		const int vy = y + int(sf * 0.55f);
+		Rect(c, vx, vy, c.w - pad - vx, barH, kPanel);
+		Rect(c, vx, vy, int((c.w - pad - vx) * m.volume / 100.0f), barH, kText);
+		y += int(sf * 1.9f);
+		// up next
+		const int limit = bottom - int(H * 0.01f);
+		if (n > 1 && y + int(sf * 1.6f) * 2 <= limit) {
+			Text(c, pad, y, "接下来", sf * 0.92f, kStripe[1]);
+			const int gw = TextWidth("接下来", sf * 0.92f) + int(sf * 0.6f);
+			Rect(c, pad + gw, y + int(sf * 0.6f), c.w - 2 * pad - gw, 1, kLine);
+			y += int(sf * 1.6f);
+			for (int k = 1; k < n && y + int(sf * 1.45f) <= limit; ++k) {
+				const auto& t = m.titles[(std::max(0, m.index) + k) % n];
+				Text(c, pad, y, Fit(t, sf, c.w - 2 * pad).c_str(), sf, kDim);
+				y += int(sf * 1.45f);
+			}
+		}
+		(void)s;
+	}
+
 	void DrawPlaceholder(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h);
@@ -1618,6 +1847,9 @@ namespace
 
 	void DrawPage(Canvas& c, const State& s)
 	{
+		g_rows.page = s.page;
+		g_rows.items.clear();
+		g_rows.top = g_rows.bottom = 0;
 		const int y = StatusBar(c, s);
 		g_statusBottom = y;
 		switch (s.page) {
@@ -1634,6 +1866,7 @@ namespace
 		case kInfoPage: DrawInfo(c, s, y); break;
 		case kCalendarPage: DrawCalendar(c, s, y); break;
 		case kMessagesPage: DrawMessages(c, s, y); break;
+		case kMusicPage: DrawMusic(c, s, y); break;
 		default: DrawPlaceholder(c, s, y); break;
 		}
 		// the banner is a separate layer (see Compose / Render) so it can slide
@@ -1652,6 +1885,25 @@ namespace
 		if (A.kind == Anim::kNone || t >= 1.0f || (A.kind != Anim::kWake && (g_from.w != iw || g_from.h != ih))) {
 			A.kind = Anim::kNone;
 			g_shown.px = g_inner.px;
+			// list scroll: the new frame slides in from where the old one was; rows the new frame leaves uncovered
+			// come from the old frame, moving with it
+			auto& S = g_scroll;
+			if (S.active) {
+				const float st = std::chrono::duration<float>(a_now - S.start).count() / kScrollSeconds;
+				if (st >= 1.0f || g_scrollFrom.w != iw || g_scrollFrom.h != ih) {
+					S.active = false;
+					return;
+				}
+				const int sh = int(std::lround(S.d * (1.0f - Spring(st))));  // new frame offset
+				const int d = int(std::lround(S.d));
+				for (int y = std::max(0, S.top); y < std::min(ih, S.bottom); ++y) {
+					const int   ny = y - sh, oy = y - sh + d;
+					const auto* src = (ny >= S.top && ny < S.bottom) ? &g_inner.px[std::size_t(ny) * iw * 4] :
+					                  (oy >= S.top && oy < S.bottom) ? &g_scrollFrom.px[std::size_t(oy) * iw * 4] :
+					                                                   nullptr;
+					if (src) std::memcpy(&g_shown.px[std::size_t(y) * iw * 4], src, std::size_t(iw) * 4);
+				}
+			}
 			return;
 		}
 		const int top = std::clamp(g_statusBottom, 0, ih);  // the status bar stays put
@@ -1745,8 +1997,9 @@ namespace Ui
 		g_state.aspect = std::clamp(a_aspect, 0.2f, 5.0f);
 	}
 
-	Action Input(Key a_key)
+	Action Input(Key a_key, Feedback* a_feedback)
 	{
+		if (a_feedback) *a_feedback = Feedback::kNone;
 		std::lock_guard lk(g_lock);
 		auto&           st = g_state;
 		const int       before = st.page;
@@ -1797,6 +2050,9 @@ namespace Ui
 				if (st.page == kRadarPage) {
 					g_radarLoaded = false;
 				}
+				if (st.page == kMusicPage) {
+					Music::Rescan();
+				}
 				break;
 			default: return Action::kNone;
 			}
@@ -1810,9 +2066,13 @@ namespace Ui
 				const int dir = a_key == Key::kRight ? 1 : -1;
 				if (st.setSel == 0) {
 					st.brightness = std::clamp(st.brightness + dir * 10, 30, 100);
-				} else {
+				} else if (st.setSel == 1) {
 					const int k = int(std::size(kOpenKeys));
 					st.openKey = (st.openKey + dir + k) % k;
+				} else if (st.setSel == 2) {
+					st.sound = !st.sound;
+				} else {
+					st.vibration = !st.vibration;
 				}
 				act = Action::kSettingsChanged;
 				break;
@@ -2003,6 +2263,21 @@ namespace Ui
 				return Action::kNone;
 			}
 			break;
+		case kMusicPage:
+			switch (a_key) {
+			case Key::kLeft: Music::Prev(); break;
+			case Key::kRight: Music::Next(); break;
+			case Key::kEnter: Music::Toggle(); break;
+			case Key::kUp:
+			case Key::kDown:
+				st.musicVolume = std::clamp(st.musicVolume + (a_key == Key::kUp ? 10 : -10), 0, 100);
+				Music::SetVolume(st.musicVolume);
+				act = Action::kSettingsChanged;
+				break;
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
 		case kRadarPage:
 			switch (a_key) {
 			case Key::kLeft: st.radarRange = std::max(0, st.radarRange - 1); break;
@@ -2017,6 +2292,12 @@ namespace Ui
 			}
 			st.page = kHome;
 			break;
+		}
+		if (a_feedback) {
+			*a_feedback = st.page != before ? (Depth(st.page) > Depth(before) ? Feedback::kOpen : Feedback::kBack) :
+			              a_key == Key::kEnter ? Feedback::kAction :
+			              a_key == Key::kBack  ? Feedback::kBack :
+			                                     Feedback::kMove;
 		}
 		if (st.page != before) {
 			g_pending = before == kHome ? Anim::kLaunch :
@@ -2209,7 +2490,7 @@ namespace Ui
 	Settings GetSettings()
 	{
 		std::lock_guard lk(g_lock);
-		return { g_state.brightness, g_state.openKey };
+		return { g_state.brightness, g_state.openKey, g_state.sound, g_state.vibration, g_state.musicVolume };
 	}
 
 	void SetSettings(const Settings& a_settings)
@@ -2217,6 +2498,10 @@ namespace Ui
 		std::lock_guard lk(g_lock);
 		g_state.brightness = std::clamp(a_settings.brightness, 30, 100);
 		g_state.openKey = std::clamp(a_settings.openKey, 0, int(std::size(kOpenKeys)) - 1);
+		g_state.sound = a_settings.sound;
+		g_state.vibration = a_settings.vibration;
+		g_state.musicVolume = std::clamp(a_settings.musicVolume, 0, 100);
+		Music::SetVolume(g_state.musicVolume);
 		++g_version;
 	}
 
@@ -2254,10 +2539,18 @@ namespace Ui
 			g_bg.Resize(cw, ch);
 			FillBackground(g_bg);
 		}
+		static unsigned musicSeq = 0;
+		static bool     musicPlaying = false;
+		const bool      nowPlaying = Music::Get().playing;
 		if (g_canvas.w != cw || g_canvas.h != ch || g_inner.w != iw || g_inner.h != ih || minute != g_drawnMinute ||
-			s.day != g_drawn.day || g_version != g_drawnVersion ||
+			s.day != g_drawn.day || g_version != g_drawnVersion || g_selMoving || nowPlaying != musicPlaying ||
+			(s.page == kMusicPage && Music::Seq() != musicSeq) ||
 			((s.page == kCameraPage || s.page == kPhotoPage) && g_camSeq.load() != g_drawnCamSeq)) {
 			g_drawnCamSeq = g_camSeq.load();
+			musicSeq = Music::Seq();
+			musicPlaying = nowPlaying;
+			const Rows before = g_rows;
+			bool       transition = false;
 			// a page change: animate from what is on screen now
 			if (g_pending != Anim::kNone) {
 				if (g_pending == Anim::kWake || (g_shown.w == iw && g_shown.h == ih)) {
@@ -2267,6 +2560,8 @@ namespace Ui
 					const bool wake = g_pending == Anim::kWake;
 					const bool open = g_pending == Anim::kLaunch || g_pending == Anim::kClose;
 					g_anim = { g_pending, g_pendingTile, now + std::chrono::milliseconds(wake ? 120 : 0), wake ? 0.5f : open ? 0.42f : 0.38f };
+					g_scroll.active = false;
+					transition = true;
 				}
 				g_pending = Anim::kNone;
 			}
@@ -2277,14 +2572,29 @@ namespace Ui
 			for (int y = 0; y < ih; ++y) {
 				std::memcpy(&g_inner.px[std::size_t(y) * iw * 4], &g_bg.px[(std::size_t(iy + y) * cw + ix) * 4], std::size_t(iw) * 4);
 			}
+			g_selMoving = false;
 			DrawPage(g_inner, s);
+			// the list's first item changed on the same page: scroll from the frame on screen to the new one
+			if (!transition && g_anim.kind == Anim::kNone && before.page == s.page && !before.items.empty() &&
+				!g_rows.items.empty() && before.items.front().first != g_rows.items.front().first &&
+				before.top == g_rows.top && g_shown.w == iw && g_shown.h == ih) {
+				for (const auto& [idx, oldY] : before.items) {
+					const auto it = std::find_if(g_rows.items.begin(), g_rows.items.end(), [&](const auto& r) { return r.first == idx; });
+					if (it != g_rows.items.end() && it->second != oldY) {
+						g_scrollFrom.w = g_shown.w, g_scrollFrom.h = g_shown.h, g_scrollFrom.px = g_shown.px;
+						g_scroll = { true, g_rows.top, std::max(g_rows.bottom, before.bottom), float(oldY - it->second), now };
+						break;
+					}
+				}
+			}
 			g_drawnMinute = minute;
 			g_drawnVersion = g_version;
 			compose = true;
 		}
 		const float bannerPos = s.page == kMessagesPage ? -1.0f : BannerPos(now);
 		const bool  bannerOn = bannerPos >= 0.0f;
-		if (g_anim.kind != Anim::kNone || bannerOn || bannerOn != g_bannerWasOn || g_canvas.w != cw || g_canvas.h != ch) {
+		if (g_anim.kind != Anim::kNone || g_scroll.active || bannerOn || bannerOn != g_bannerWasOn || g_canvas.w != cw ||
+			g_canvas.h != ch) {
 			compose = true;
 		}
 		if (compose) {
@@ -2311,7 +2621,7 @@ namespace Ui
 		// fast frames while something moves: a transition, or the banner sliding in / out
 		const float bannerAge = std::chrono::duration<float>(now - (g_bannerUntil - std::chrono::seconds(4))).count();
 		const bool  bannerMoving = bannerOn && (bannerAge < kBannerIn || bannerAge > 4.0f - kBannerOut - 0.1f);
-		g_animating = g_anim.kind != Anim::kNone || g_pending != Anim::kNone || bannerMoving;
+		g_animating = g_anim.kind != Anim::kNone || g_pending != Anim::kNone || bannerMoving || g_selMoving || g_scroll.active;
 		const float bright = s.brightness / 100.0f * g_fade;
 		g_drawn = s;
 		const float sy = float(ch) / float(th);  // canvas rows per upright texture row

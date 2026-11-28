@@ -43,15 +43,27 @@ namespace Ui
 		kToggleTrack,      // Quests page: track / untrack SelectedQuest()
 		kSummonContact,    // call screen: bring SelectedContact() to the player
 	};
-	Action Input(Key a_key);  // from the game's task thread while the phone is open
+	// what a key press did, for the button sound / rumble
+	enum class Feedback
+	{
+		kNone,    // key not used here
+		kMove,    // selection, scroll or value changed
+		kOpen,    // a deeper page opened
+		kBack,    // back to a shallower page
+		kAction,  // Enter did something on this page
+	};
+	Action Input(Key a_key, Feedback* a_feedback = nullptr);  // from the game's task thread while the phone is open
 	void   OnOpen();          // phone taken out: back to the home screen
 	bool   Animating();       // a page transition or the banner is moving: write the screen at a higher rate
 
 	// ---- settings (Settings app; saved in PhoneTest.ini) ----
 	struct Settings
 	{
-		int brightness = 100;  // percent, 30..100
-		int openKey = 0;       // index into the open-key choices
+		int  brightness = 100;   // percent, 30..100
+		int  openKey = 0;        // index into the open-key choices
+		bool sound = true;       // button sounds
+		bool vibration = true;   // controller rumble
+		int  musicVolume = 60;   // Music app, percent
 	};
 	Settings    GetSettings();
 	void        SetSettings(const Settings& a_settings);

@@ -93,12 +93,22 @@ int main(int argc, char** argv)
 	Ui::OnOpen();
 	Sheet(out + "/1-wake.png", 18, 40);
 
-	Ui::Input(Ui::Key::kRight);  // select Quests
-	Settle();
+	Ui::Input(Ui::Key::kRight);  // select Quests: the selection box slides
+	Sheet(out + "/0-select.png", 12, 40);
 	Ui::Input(Ui::Key::kEnter);
-	Ui::SetQuests({ { "古老的家园", "主线", { "前往新亚特兰蒂斯" }, { { "前往新亚特兰蒂斯", 1 } }, 1, true },
-		{ "小规模入侵", "派系", { "清除地球舰队入侵" }, { { "清除地球舰队入侵", 1 }, { "返回", 2 } }, 2, false } });
+	std::vector<Ui::QuestEntry> quests = {
+		{ "古老的家园", "主线", { "前往新亚特兰蒂斯" }, { { "前往新亚特兰蒂斯", 1 } }, 1, true },
+		{ "小规模入侵", "派系", { "清除地球舰队入侵" }, { { "清除地球舰队入侵", 1 }, { "返回", 2 } }, 2, false } };
+	for (int i = 0; i < 6; ++i) {
+		quests.push_back({ "支线任务 " + std::to_string(i + 1), "支线", { "和 NPC 对话", "收集样本" }, { { "和 NPC 对话", 1 } }, std::uint32_t(10 + i), false });
+	}
+	Ui::SetQuests(quests);
 	Sheet(out + "/2-launch.png", 18, 40);
+
+	Ui::Input(Ui::Key::kDown);  // the list scrolls one quest
+	Sheet(out + "/2b-scroll.png", 12, 40);
+	Ui::Input(Ui::Key::kUp);
+	Settle();
 
 	Ui::Input(Ui::Key::kEnter);  // quest details
 	Sheet(out + "/3-push.png", 12, 40);
@@ -108,6 +118,21 @@ int main(int argc, char** argv)
 
 	Ui::Input(Ui::Key::kBack);  // home
 	Sheet(out + "/5-close.png", 18, 40);
+
+	for (int i = 0; i < 7; ++i) Ui::Input(Ui::Key::kRight);  // Music app
+	Settle();
+	Ui::Input(Ui::Key::kEnter);
+	Sheet(out + "/8-music.png", 12, 40);
+	Ui::Input(Ui::Key::kBack);
+	Settle();
+	for (int i = 0; i < 4; ++i) Ui::Input(Ui::Key::kRight);  // Settings app
+	Ui::Input(Ui::Key::kEnter);
+	Settle();
+	Ui::Input(Ui::Key::kDown);
+	Ui::Input(Ui::Key::kDown);
+	Sheet(out + "/9-settings.png", 12, 40);
+	Ui::Input(Ui::Key::kBack);
+	Settle();
 
 	Ui::PushMessage("小规模入侵：…", "新目标：前往…并清除地球舰队入侵");
 	Sheet(out + "/6-banner-in.png", 18, 40);

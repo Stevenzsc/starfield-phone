@@ -27,7 +27,7 @@ target("PhoneTest")
 -- UiPreview: renders the phone UI (src/ui.cpp) to PNG contact sheets of the page transitions; run by CI
 target("UiPreview")
     set_kind("binary")
-    add_files("src/ui.cpp", "preview/main.cpp")
+    add_files("src/ui.cpp", "src/music.cpp", "preview/main.cpp")
     add_includedirs("src")
     add_packages("stb")
     add_cxflags("/utf-8")

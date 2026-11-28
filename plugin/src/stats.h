@@ -30,4 +30,10 @@ namespace Stats
 
 	// show a line in the game's HUD notification area (Papyrus Debug.Notification)
 	void HudNotify(const std::string& a_utf8);
+
+	// play a game UI sound by its Wwise event name ("UIMenuGeneralFocus"; Papyrus WwiseEvent.PlayMenuSound)
+	void PlayUiSound(const char* a_id);
+
+	// controller rumble (Papyrus Game.ShakeController); strengths 0..1
+	void Rumble(float a_small, float a_big, float a_seconds);
 }

@@ -156,6 +156,12 @@ namespace
 				st.brightness = std::atoi(line.c_str() + 11);
 			} else if (line.rfind("open_key=", 0) == 0) {
 				st.openKey = std::atoi(line.c_str() + 9);
+			} else if (line.rfind("sound=", 0) == 0) {
+				st.sound = std::atoi(line.c_str() + 6) != 0;
+			} else if (line.rfind("vibration=", 0) == 0) {
+				st.vibration = std::atoi(line.c_str() + 10) != 0;
+			} else if (line.rfind("music_volume=", 0) == 0) {
+				st.musicVolume = std::atoi(line.c_str() + 13);
 			} else if (line.rfind("dev_keys=", 0) == 0) {
 				g_devKeys = std::atoi(line.c_str() + 9) != 0;
 			}
@@ -177,18 +183,51 @@ namespace
 				if (!line.empty() && line.back() == '\r') {
 					line.pop_back();
 				}
-				if (line.rfind("brightness=", 0) != 0 && line.rfind("open_key=", 0) != 0) {
+				const bool ours = line.rfind("brightness=", 0) == 0 || line.rfind("open_key=", 0) == 0 || line.rfind("sound=", 0) == 0 ||
+				                  line.rfind("vibration=", 0) == 0 || line.rfind("music_volume=", 0) == 0;
+				if (!ours) {
 					lines.push_back(line);
 				}
 			}
 		}
 		lines.push_back("brightness=" + std::to_string(st.brightness));
 		lines.push_back("open_key=" + std::to_string(st.openKey));
+		lines.push_back(std::string("sound=") + (st.sound ? "1" : "0"));
+		lines.push_back(std::string("vibration=") + (st.vibration ? "1" : "0"));
+		lines.push_back("music_volume=" + std::to_string(st.musicVolume));
 		std::ofstream out(kIniPath, std::ios::trunc);
 		for (const auto& l : lines) {
 			out << l << '\n';
 		}
 		REX::INFO("settings saved: brightness {}% open key {}", st.brightness, Ui::OpenKeyName(st.openKey));
+	}
+
+	// controller rumble, if enabled in the Settings app
+	void Buzz(float a_small, float a_big, float a_seconds)
+	{
+		if (Ui::GetSettings().vibration) {
+			Stats::Rumble(a_small, a_big, a_seconds);
+		}
+	}
+
+	// button sound (the game's own menu sounds) and a light tick on Enter
+	void PlayFeedback(Ui::Feedback a_fb)
+	{
+		if (a_fb == Ui::Feedback::kNone) {
+			return;
+		}
+		if (Ui::GetSettings().sound) {
+			switch (a_fb) {
+			case Ui::Feedback::kMove: Stats::PlayUiSound("UIMenuGeneralFocus"); break;
+			case Ui::Feedback::kOpen:
+			case Ui::Feedback::kAction: Stats::PlayUiSound("UIMenuGeneralOK"); break;
+			case Ui::Feedback::kBack: Stats::PlayUiSound("UIMenuGeneralCancel"); break;
+			default: break;
+			}
+		}
+		if (a_fb == Ui::Feedback::kOpen || a_fb == Ui::Feedback::kAction) {
+			Buzz(0.2f, 0.0f, 0.04f);
+		}
 	}
 
 	std::vector<std::string> LoadModels()
@@ -466,7 +505,10 @@ namespace
 				if (!KeyEdge(nav[i].first, g_navDown[i])) {
 					continue;
 				}
-				switch (Ui::Input(nav[i].second)) {
+				Ui::Feedback fb = Ui::Feedback::kNone;
+				const auto   act = Ui::Input(nav[i].second, &fb);
+				PlayFeedback(fb);
+				switch (act) {
 				case Ui::Action::kSettingsChanged:
 					SaveSettings();
 					break;
@@ -482,12 +524,14 @@ namespace
 					const auto who = Ui::SelectedContact();
 					if (who.formID && Stats::Summon(who.formID)) {
 						Ui::SetCallResult("“收到，马上到。”");
+						Buzz(0.3f, 0.3f, 0.2f);
 					}
 					break;
 				}
 				case Ui::Action::kTakePhoto:
 					// the photo comes from the same source as the viewfinder (the second view once it renders)
 					Camera::RequestPhoto();
+					Buzz(0.6f, 0.0f, 0.08f);  // shutter click
 					break;
 				case Ui::Action::kOpenPhotoMode:
 					// put the phone away, then open photo mode once the hand is down
@@ -609,14 +653,20 @@ namespace
 			// a save load (or fast travel, sleep) moves the game clock: record the new state without messages
 			const bool silent = gameHours < 0 || hours < gameHours || hours - gameHours > 2.0;
 			gameHours = hours;
+			bool buzz = false;
 			for (auto& ch : Quests::PollChanges(silent)) {
 				REX::INFO("message: {} | {}", ch.title, ch.text);
 				Ui::PushMessage(std::move(ch.title), std::move(ch.text));
+				buzz = true;
 			}
 			static int lastLevel = 0;
 			const int  level = Stats::PlayerLevel();
 			if (!silent && lastLevel > 0 && level == lastLevel + 1) {
 				Ui::PushMessage("角色", "升级到 " + std::to_string(level) + " 级");
+				buzz = true;
+			}
+			if (buzz) {
+				Buzz(0.25f, 0.45f, 0.3f);  // new message (the game plays its own quest / level sounds)
 			}
 			lastLevel = level;
 		}
