@@ -223,6 +223,10 @@ namespace
 	};
 	std::deque<Step> g_steps;
 
+	// last successful open / close; the next one waits until its animation is over
+	constexpr auto                        kActionGap = std::chrono::milliseconds(2500);
+	std::chrono::steady_clock::time_point g_lastAction{};
+
 	void Perform(const Binding& a_b);
 
 	void QueuePreloadOpen()
@@ -287,6 +291,7 @@ namespace
 		const bool ok = fn(&data);
 		REX::INFO("{} ({:08X}) -> PerformAction returned {}", a_b.name, a_b.formID, ok);
 		if (ok) {
+			g_lastAction = std::chrono::steady_clock::now();
 			g_open = a_b.formID == 0x0001901F;
 			if (g_open) {
 				LoadScreenOptions();
@@ -378,7 +383,11 @@ namespace
 		}
 		// open key (Settings app; default F7) toggles the phone; F8 also puts it away
 		if (KeyEdge(Ui::OpenKeyVk(Ui::GetSettings().openKey), g_openKeyDown) && g_steps.empty()) {
-			if (g_open) {
+			const auto ready = g_lastAction + kActionGap;
+			if (std::chrono::steady_clock::now() < ready) {
+				// the raise / lower animation is still playing: an action now freezes the view (seen in game) -> queue it
+				g_steps.push_back({ ready, std::size_t(g_open ? 1 : 0) });
+			} else if (g_open) {
 				Perform(kBindings[1]);
 			} else if (!g_preloaded) {
 				QueuePreloadOpen();  // first open of this model shows nothing; open, close, open

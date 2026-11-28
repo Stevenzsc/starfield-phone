@@ -275,10 +275,40 @@ namespace
 		}
 	}
 
+	// direct queues seen in ExecuteCommandLists and how often (the camera copies the back buffer on the busiest)
+	struct QueueCount
+	{
+		ID3D12CommandQueue* queue = nullptr;
+		std::uint64_t       calls = 0;
+	};
+	std::mutex g_queueLock;
+	QueueCount g_queues[8];
+
+	void CountQueue(ID3D12CommandQueue* a_queue)
+	{
+		std::lock_guard lk(g_queueLock);
+		for (auto& q : g_queues) {
+			if (q.queue == a_queue) {
+				++q.calls;
+				return;
+			}
+			if (!q.queue) {
+				q.queue = a_queue;
+				q.calls = 1;
+				Log("direct queue seen: %p", (void*)a_queue);
+				return;
+			}
+		}
+	}
+
 	void STDMETHODCALLTYPE Execute_Hook(ID3D12CommandQueue* a_this, UINT a_count, ID3D12CommandList* const* a_lists)
 	{
 		static auto last = std::chrono::steady_clock::now();
 		static std::uint32_t frame = 0;
+
+		if (a_this->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+			CountQueue(a_this);
+		}
 
 		if (g_active.load() && a_this->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
 			std::unique_lock lk(g_lock, std::try_to_lock);
@@ -373,6 +403,22 @@ namespace Screen
 		dev->Release();
 		Log("screen writer armed for %ux%u RGBA8 textures", a_width, a_height);
 		return true;
+	}
+
+	ID3D12CommandQueue* MainQueue()
+	{
+		std::lock_guard lk(g_queueLock);
+		const QueueCount* best = nullptr;
+		for (const auto& q : g_queues) {
+			if (q.queue && (!best || q.calls > best->calls)) {
+				best = &q;
+			}
+		}
+		if (!best) {
+			return nullptr;
+		}
+		best->queue->AddRef();
+		return best->queue;
 	}
 
 	void SetMarker(std::uint32_t a_count)

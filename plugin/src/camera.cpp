@@ -8,6 +8,7 @@
 // This file does not use CommonLibSF so that <windows.h>, <d3d12.h> and <dxgi1_4.h> can be included normally.
 
 #include "camera.h"
+#include "screen.h"
 #include "ui.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -406,29 +407,63 @@ namespace
 		}
 
 		IDXGISwapChain3* sc3 = nullptr;
-		if (FAILED(a_sc->QueryInterface(IID_PPV_ARGS(&sc3)))) {
+		if (const HRESULT qhr = a_sc->QueryInterface(IID_PPV_ARGS(&sc3)); FAILED(qhr)) {
+			static bool once = false;
+			if (!once) {
+				once = true;
+				Log("camera: swap chain %p has no IDXGISwapChain3 (0x%08X)", (void*)a_sc, (unsigned)qhr);
+			}
+			g_c.last = now;
 			return;
 		}
 		ID3D12Resource*     bb = nullptr;
 		ID3D12CommandQueue* queue = nullptr;
 		ID3D12Device*       dev = nullptr;
-		const UINT          index = sc3->GetCurrentBackBufferIndex();
-		const bool          got = SUCCEEDED(sc3->GetBuffer(index, IID_PPV_ARGS(&bb))) &&
-		                 SUCCEEDED(a_sc->GetDevice(IID_PPV_ARGS(&queue))) && SUCCEEDED(bb->GetDevice(IID_PPV_ARGS(&dev)));
-		sc3->Release();
 		auto release = [&] {
 			if (bb) bb->Release();
 			if (queue) queue->Release();
 			if (dev) dev->Release();
 		};
-		if (!got || !InitCapture(dev)) {
+		static int fails = 0;
+		auto fail = [&](const char* a_what, HRESULT a_hr) {
+			if (fails < 6) {
+				++fails;
+				Log("camera: %s failed (0x%08X)", a_what, (unsigned)a_hr);
+			}
+			g_c.last = now;  // don't retry on every present
+			release();
+		};
+		const UINT index = sc3->GetCurrentBackBufferIndex();
+		HRESULT    hr = sc3->GetBuffer(index, IID_PPV_ARGS(&bb));
+		sc3->Release();
+		if (FAILED(hr)) {
+			return fail("GetBuffer", hr);
+		}
+		if (hr = bb->GetDevice(IID_PPV_ARGS(&dev)); FAILED(hr)) {
+			return fail("back buffer GetDevice", hr);
+		}
+		// the swap chain's own queue; if DXGI does not hand it out, the game's busiest direct queue
+		if (FAILED(a_sc->GetDevice(IID_PPV_ARGS(&queue)))) {
+			queue = Screen::MainQueue();
 			static bool once = false;
 			if (!once) {
 				once = true;
-				Log("camera: no D3D12 back buffer / queue on this swap chain (got=%d)", got);
+				Log("camera: swap chain gave no queue; using the game's main direct queue %p", (void*)queue);
 			}
-			release();
-			return;
+		}
+		if (!queue) {
+			return fail("command queue lookup", E_NOINTERFACE);
+		}
+		ID3D12Device* qdev = nullptr;
+		if (SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(&qdev)))) {
+			const bool same = qdev == dev;
+			qdev->Release();
+			if (!same) {
+				return fail("queue / back buffer device match", E_FAIL);
+			}
+		}
+		if (!InitCapture(dev)) {
+			return fail("capture setup", E_FAIL);
 		}
 
 		const auto bd = bb->GetDesc();
