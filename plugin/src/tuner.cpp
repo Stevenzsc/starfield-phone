@@ -8,6 +8,7 @@
 // (The engine overwrites the AnimObject ROOT transform when it attaches it, so the root itself can't be moved.)
 
 #include "pch.h"
+#include "lang.h"
 #include "tuner.h"
 #include "ui.h"
 
@@ -926,21 +927,21 @@ namespace Tuner
 					if (vk == 0x6E) {  // . next target
 						if (pressed) {
 							g_target = (g_target + 1) % (kBones + 1);
-							const char* label = g_target == 0 ? "手机" : kBoneLabels[g_target - 1];
-							Ui::SetCameraStatus(std::string("小键盘调整：") + label);
+							const char* label = g_target == 0 ? Tr("手机") : Tr(kBoneLabels[g_target - 1]);
+							Ui::SetCameraStatus(std::string(Tr("小键盘调整：")) + label);
 							REX::INFO("tuner: target {}", g_target);
 						}
 					} else if (vk == 0x60) {  // 0 reset the target
 						if (pressed) {
 							if (g_target == 0) g_cam = Xf{};
 							else g_boneRot[g_target - 1] = kIdentity;
-							Ui::SetCameraStatus("已重置");
+							Ui::SetCameraStatus(Tr("已重置"));
 						}
 					} else if (vk == 0x65) {  // 5 save both
 						if (pressed) {
 							Save(g_cam, kCameraSavePath);
 							SaveArm();
-							Ui::SetCameraStatus("姿势已保存");
+							Ui::SetCameraStatus(Tr("姿势已保存"));
 						}
 					} else if (pressed || now >= g_nextRepeat) {
 						if (g_target == 0) {

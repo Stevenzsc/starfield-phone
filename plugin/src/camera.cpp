@@ -8,6 +8,7 @@
 // This file does not use CommonLibSF so that <windows.h>, <d3d12.h> and <dxgi1_4.h> can be included normally.
 
 #include "camera.h"
+#include "lang.h"
 #include "gallery.h"
 #include "screen.h"
 #include "ui.h"
@@ -303,7 +304,7 @@ namespace
 				Gallery::TagCurrent(path);  // location ("GPS") of the moment
 				where = Gallery::PlaceTitle(Gallery::CurrentGeo());
 			}
-			Ui::SetCameraStatus(ok ? (where.empty() ? std::string("已保存") : "已保存 · " + where) : std::string("保存失败"));
+			Ui::SetCameraStatus(ok ? (where.empty() ? std::string(Tr("已保存")) : Tr("已保存 · ") + where) : std::string(Tr("保存失败")));
 			g_photoSaving = false;
 		}).detach();
 	}

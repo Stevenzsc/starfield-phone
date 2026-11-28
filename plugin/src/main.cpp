@@ -22,6 +22,7 @@
 // Results go to Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log.
 
 #include "pch.h"
+#include "lang.h"
 #include "camera.h"
 #include "gallery.h"
 #include "screen.h"
@@ -162,6 +163,8 @@ namespace
 				st.vibration = std::atoi(line.c_str() + 10) != 0;
 			} else if (line.rfind("music_volume=", 0) == 0) {
 				st.musicVolume = std::atoi(line.c_str() + 13);
+			} else if (line.rfind("language=", 0) == 0) {
+				st.language = std::atoi(line.c_str() + 9);
 			} else if (line.rfind("dev_keys=", 0) == 0) {
 				g_devKeys = std::atoi(line.c_str() + 9) != 0;
 			}
@@ -169,6 +172,27 @@ namespace
 		Ui::SetSettings(st);
 		const auto now = Ui::GetSettings();
 		REX::INFO("settings: brightness {}% open key {}", now.brightness, Ui::OpenKeyName(now.openKey));
+	}
+
+	// "auto" language: the phone follows the language of the game's own text. The name of the Credits form (MISC
+	// 0000000F, "信用点" / "Credits") read through GetFullName (ID 47496): Chinese if it holds a CJK character.
+	void DetectGameLanguage()
+	{
+		const char* name = nullptr;
+		if (auto* credits = RE::TESForm::LookupByID(0x0000000F)) {
+			using fn_t = const char* (*)(const RE::TESForm*);
+			name = reinterpret_cast<fn_t>(REL::ID(47496).address())(credits);
+		}
+		bool cjk = false;
+		for (const auto* p = reinterpret_cast<const unsigned char*>(name ? name : ""); *p; ++p) {
+			// UTF-8 lead bytes 0xE4..0xE9 = CJK ideographs (U+4000..U+9FFF); Japanese "クレジット" (kana) and Korean stay English
+			if (*p >= 0xE4 && *p <= 0xE9) {
+				cjk = true;
+				break;
+			}
+		}
+		Lang::SetGameEnglish(name && *name && !cjk);
+		REX::INFO("language: game text '{}' -> {}", name ? name : "", cjk ? "Chinese" : "English");
 	}
 
 	// rewrite the settings lines of the ini, keeping every other line
@@ -184,7 +208,7 @@ namespace
 					line.pop_back();
 				}
 				const bool ours = line.rfind("brightness=", 0) == 0 || line.rfind("open_key=", 0) == 0 || line.rfind("sound=", 0) == 0 ||
-				                  line.rfind("vibration=", 0) == 0 || line.rfind("music_volume=", 0) == 0;
+				                  line.rfind("vibration=", 0) == 0 || line.rfind("music_volume=", 0) == 0 || line.rfind("language=", 0) == 0;
 				if (!ours) {
 					lines.push_back(line);
 				}
@@ -195,6 +219,7 @@ namespace
 		lines.push_back(std::string("sound=") + (st.sound ? "1" : "0"));
 		lines.push_back(std::string("vibration=") + (st.vibration ? "1" : "0"));
 		lines.push_back("music_volume=" + std::to_string(st.musicVolume));
+		lines.push_back("language=" + std::to_string(st.language));
 		std::ofstream out(kIniPath, std::ios::trunc);
 		for (const auto& l : lines) {
 			out << l << '\n';
@@ -523,7 +548,7 @@ namespace
 				case Ui::Action::kSummonContact: {
 					const auto who = Ui::SelectedContact();
 					if (who.formID && Stats::Summon(who.formID)) {
-						Ui::SetCallResult("“收到，马上到。”");
+						Ui::SetCallResult(Tr("“收到，马上到。”"));
 						Buzz(0.3f, 0.3f, 0.2f);
 					}
 					break;
@@ -626,7 +651,7 @@ namespace
 				for (const auto& [path, geo] : Gallery::PollNewPhotoModePhotos()) {
 					const auto place = Gallery::PlaceTitle(geo);
 					REX::INFO("gallery: photo mode photo tagged '{}' gps {} {} {}", place, geo.gps, geo.lat, geo.lon);
-					Stats::HudNotify(place.empty() ? "照片已保存（位置未知）" : "照片已记录位置：" + place);
+					Stats::HudNotify(place.empty() ? Tr("照片已保存（位置未知）") : Tr("照片已记录位置：") + place);
 				}
 			}
 		}
@@ -662,7 +687,7 @@ namespace
 			static int lastLevel = 0;
 			const int  level = Stats::PlayerLevel();
 			if (!silent && lastLevel > 0 && level == lastLevel + 1) {
-				Ui::PushMessage("角色", "升级到 " + std::to_string(level) + " 级");
+				Ui::PushMessage(Tr("角色"), Tr("升级到 ") + std::to_string(level) + Tr(" 级"));
 				buzz = true;
 			}
 			if (buzz) {
@@ -681,6 +706,7 @@ namespace
 		if (a_msg->type == SFSE::MessagingInterface::kPostDataLoad) {
 			if (const auto* tasks = SFSE::GetTaskInterface()) {
 				Tuner::Load();
+				DetectGameLanguage();
 				LoadSettings();
 				UseDefaultModel();
 				tasks->AddPermanentTask([]() { Tick(); });

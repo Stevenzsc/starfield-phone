@@ -7,6 +7,7 @@
 // This file does not use CommonLibSF.
 
 #include "ui.h"
+#include "lang.h"
 #include "gallery.h"
 #include "music.h"
 
@@ -419,6 +420,7 @@ namespace
 		bool sound = true;
 		bool vibration = true;
 		int  musicVolume = 60;
+		int  language = 0;  // Lang mode: 0 auto, 1 中文, 2 English
 		// quests
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
 		int detailScroll = 0; // first objective row on the quest details page
@@ -500,7 +502,7 @@ namespace
 	constexpr OpenKey kOpenKeys[] = {
 		{ 0x76, "F7" }, { 0x75, "F6" }, { 0x79, "F10" }, { 0x2D, "Insert" }, { 0x24, "Home" }, { 0x23, "End" },
 	};
-	constexpr int kSettingsRows = 4;  // brightness, open key, button sounds, rumble
+	constexpr int kSettingsRows = 5;  // brightness, open key, button sounds, rumble, language
 
 	std::mutex g_lock;
 	State      g_state;     // latest values (guarded)
@@ -510,6 +512,7 @@ namespace
 	unsigned   g_drawnVersion = 0;
 	std::vector<Ui::QuestEntry> g_quests;   // guarded by g_lock
 	bool                        g_questsLoaded = false;
+	int                         g_questFirst = 0;  // first quest shown on the Quests page (render side)
 	// info pages (g_lock)
 	Ui::Info                 g_infoPage = Ui::Info::kNone;  // page g_infoRows belongs to
 	std::vector<Ui::InfoRow> g_infoRows;
@@ -540,14 +543,14 @@ namespace
 	std::vector<Ui::Contact> g_contacts;
 	bool                     g_contactsLoaded = false;
 	Ui::Contact              g_callee;       // the contact on the call screen
-	std::string              g_callResult;  // "已呼叫，正在赶来" etc.
+	std::string              g_callResult;  // Tr("已呼叫，正在赶来") etc.
 	std::vector<Ui::Blip>    g_blips;
 	bool                     g_radarLoaded = false;
 
 	// gallery: photo list and albums (g_lock); the decoded photo comes from a worker thread (g_camLock, bumps g_camSeq)
 	struct Album
 	{
-		std::string      title;  // place, "全部照片" or "未知位置"
+		std::string      title;  // place, Tr("全部照片") or Tr("未知位置")
 		std::string      sub;    // star system / count line
 		std::vector<int> photos;  // indexes into g_photos, newest first
 	};
@@ -831,7 +834,7 @@ namespace
 			const int h = int(bh * (0.3f + 0.233f * i));
 			Rect(c, sx + i * int(f * 0.3f), by + bh - h, std::max(2, int(f * 0.17f)), h, kText);
 		}
-		const char* net = "星联";
+		const char* net = Tr("星联");
 		Text(c, sx - TextWidth(net, f * 0.85f) - int(f * 0.45f), y + int(f * 0.06f), net, f * 0.85f, kDim);
 		const int line = y + int(f * 1.45f);
 		Rect(c, pad, line, c.w - 2 * pad, 1, kLine);
@@ -892,18 +895,20 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
-		const int   bottom = Prompts(c, { { "←→", "选择" }, { "Enter", "打开" } });
+		const int   bottom = Prompts(c, { { "←→", Tr("选择") }, { "Enter", Tr("打开") } });
 
 		// big clock, date, stripe badge
 		char clock[16];
 		ClockText(s, clock);
-		const float clockF = std::min(H * 0.17f, W * 0.24f);
+		// four rows of apps (portrait, 13 apps): a smaller clock leaves the tiles room
+		const bool  fourRows = !(W > H * 1.3f) && std::size(kApps) > 12;
+		const float clockF = std::min(H * (fourRows ? 0.13f : 0.17f), W * 0.24f);
 		const int   cy = a_y + int(H * 0.02f);
 		Text(c, pad, cy, clock, clockF, kText);
 		const int bw = std::max(4, int(H * 0.014f)), gap = std::max(2, bw / 2);
 		Stripes(c, c.w - pad - 4 * bw - 3 * gap, cy + int(clockF * 0.28f), bw, int(clockF * 0.72f), gap);
 		char date[64];
-		std::snprintf(date, sizeof(date), "%u年%u月%u日", s.year, s.month + 1, s.day);
+		std::snprintf(date, sizeof(date), "%s", Lang::Date(s.year, s.month, s.day).c_str());
 		const float dateF = std::max(13.0f, H * 0.042f);
 		const int   dy = cy + int(clockF * 1.08f);
 		Text(c, pad, dy, date, dateF, kDim);
@@ -920,12 +925,13 @@ namespace
 		const int   byWidth = (c.w - 2 * pad - (cols - 1) * gapX) / cols;
 		const int   byHeight = (bottom - gridTop - int(H * 0.02f) - rows * labelH - (rows - 1) * gapY) / rows;
 		const int   tile = std::max(16, std::min(byWidth, byHeight));
-		const int   gridW = cols * tile + (cols - 1) * gapX;
-		const int   gx = (c.w - gridW) / 2;
+		// columns spread over the width, so labels have room when the tiles are height-limited
+		const int   pitch = (c.w - 2 * pad + gapX) / cols;
+		const int   gx = pad + (pitch - gapX - tile) / 2;
 		// tiles first, then the (moving) selection box over them, then icons and labels
 		for (std::size_t i = 0; i < std::size(kApps); ++i) {
 			const int col = int(i) % cols, row = int(i) / cols;
-			const int x = gx + col * (tile + gapX);
+			const int x = gx + col * pitch;
 			const int y = gridTop + row * (tile + labelH + gapY);
 			g_tiles[i] = { x, y, tile, tile };
 			Rect(c, x, y, tile, tile, kPanel, 0.9f);
@@ -943,7 +949,7 @@ namespace
 			} else {
 				TextCentered(c, x + tile / 2, y + tile / 2 - int(tile * 0.24f), a.glyph, tile * 0.42f, fg);
 			}
-			TextCentered(c, x + tile / 2, y + tile + int(labelF * 0.3f), a.label, labelF, sel ? kText : kDim);
+			TextCentered(c, x + tile / 2, y + tile + int(labelF * 0.3f), Tr(a.label), labelF, sel ? kText : kDim);
 			if (i == kAppMessages && g_unread > 0) {  // unread badge on the Messages tile
 				char n[8];
 				std::snprintf(n, sizeof(n), "%d", std::min(g_unread, 99));
@@ -959,14 +965,15 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
-		Prompts(c, { { "↑↓", "选择" }, { "←→", "调整" }, { "退格", "返回" } });
-		int         y = Header(c, a_y, "设置");
+		Prompts(c, { { "↑↓", Tr("选择") }, { "←→", Tr("调整") }, { Tr("退格"), Tr("返回") } });
+		int         y = Header(c, a_y, Tr("设置"));
 		const int   rowH = int(H * 0.095f);
 		const float f = std::max(13.0f, H * 0.044f);
 		char        bright[16];
 		std::snprintf(bright, sizeof(bright), "%d%%", s.brightness);
-		const char* labels[kSettingsRows] = { "屏幕亮度", "打开手机", "按键音效", "手柄震动" };
-		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name, s.sound ? "开" : "关", s.vibration ? "开" : "关" };
+		const char* labels[kSettingsRows] = { Tr("屏幕亮度"), Tr("打开手机"), Tr("按键音效"), Tr("手柄震动"), Lang::English() ? "Language" : "语言 / Language" };
+		const char* values[kSettingsRows] = { bright, kOpenKeys[s.openKey].name, s.sound ? Tr("开") : Tr("关"), s.vibration ? Tr("开") : Tr("关"),
+			Lang::ModeName(s.language) };
 		const FRect box = SelBox(kSettingsPage, { pad, y + s.setSel * rowH, c.w - 2 * pad, rowH - 2 });
 		for (int i = 0; i < kSettingsRows; ++i) {
 			if (!Covered(box, pad, y + i * rowH, c.w - 2 * pad, rowH - 2)) {
@@ -991,7 +998,7 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const float f = std::max(12.0f, H * 0.034f);
-		const int   bottom = Prompts(c, { { "Enter", "拍照" }, { "↑", "拍照模式" }, { "退格", "返回" } });
+		const int   bottom = Prompts(c, { { "Enter", Tr("拍照") }, { "↑", Tr("拍照模式") }, { Tr("退格"), Tr("返回") } });
 		const int   d = int(std::min(W * 0.16f, H * 0.1f));  // shutter size
 		const int   vx = int(W * 0.03f), vy = a_y + int(H * 0.02f);
 		const int   vw = c.w - 2 * vx, vh = bottom - vy - d - int(H * 0.04f);
@@ -1007,7 +1014,7 @@ namespace
 				}
 			} else {
 				Rect(c, vx, vy, vw, vh, { 0, 0, 0 });
-				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "取景中…", f * 1.2f, kDim);
+				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), Tr("取景中…"), f * 1.2f, kDim);
 			}
 			if (now < g_camFlashUntil) {
 				Rect(c, vx, vy, vw, vh, { 255, 255, 255 }, 0.7f);
@@ -1039,8 +1046,8 @@ namespace
 	void BuildAlbums(int a_filter)
 	{
 		g_albums.clear();
-		Album              all{ "全部照片", "", {} };
-		Album              unknown{ "未知位置", "没有位置记录的照片", {} };
+		Album              all{ Tr("全部照片"), "", {} };
+		Album              unknown{ Tr("未知位置"), Tr("没有位置记录的照片"), {} };
 		std::vector<Album> places;
 		for (int i = 0; i < int(g_photos.size()); ++i) {
 			const auto& p = g_photos[i];
@@ -1090,14 +1097,14 @@ namespace
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
 		const int   n = int(g_albums.size());
-		const int   bottom = Prompts(c, { { "↑↓", "选择" }, { "←→", kGalFilters[s.galFilter] }, { "Enter", "打开" }, { "退格", "返回" } });
+		const int   bottom = Prompts(c, { { "↑↓", Tr("选择") }, { "←→", Tr(kGalFilters[s.galFilter]) }, { "Enter", Tr("打开") }, { Tr("退格"), Tr("返回") } });
 		char        note[32];
-		std::snprintf(note, sizeof(note), "%d 张", n ? int(g_albums[0].photos.size()) : 0);
-		int         y = Header(c, a_y, "相册", note);
+		std::snprintf(note, sizeof(note), Tr("%d 张"), n ? int(g_albums[0].photos.size()) : 0);
+		int         y = Header(c, a_y, Tr("相册"), note);
 		const float f = std::max(13.0f, H * 0.042f), sf = f * 0.78f;
 		if (!n) {
-			TextCentered(c, c.w / 2, y + int(H * 0.12f), "还没有照片", std::max(16.0f, H * 0.05f), kText);
-			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), "手机相机或拍照模式拍的照片会出现在这里", sf, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f), Tr("还没有照片"), std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), Tr("手机相机或拍照模式拍的照片会出现在这里"), sf, kDim);
 			return;
 		}
 		const int limit = bottom - int(H * 0.01f);
@@ -1119,7 +1126,7 @@ namespace
 			RowMark(i, y);
 			const Rgb fg = on ? kSelText : kText, dim = on ? Rgb{ 70, 76, 84 } : kDim;
 			// pin mark for place albums
-			const bool place = i > 0 && a.title != "未知位置";
+			const bool place = i > 0 && a.title != Tr("未知位置");
 			int        tx = pad + inner;
 			if (place) {
 				Rect(c, tx, y + int(f * 0.3f), int(f * 0.28f), int(f * 0.75f), on ? kSelText : kStripe[1]);
@@ -1130,7 +1137,7 @@ namespace
 			const int cw = TextWidth(count, f);
 			Text(c, tx, y + int(H * 0.008f), Fit(a.title, f, c.w - pad - inner - tx - cw - inner).c_str(), f, fg);
 			Text(c, c.w - pad - inner - cw, y + int(H * 0.008f), count, f, dim);
-			const std::string sub = i == 0 ? std::string(kGalFilters[s.galFilter]) + "照片" : (a.sub.empty() ? "—" : a.sub);
+			const std::string sub = i == 0 ? std::string(Tr(kGalFilters[s.galFilter])) + Tr("照片") : (a.sub.empty() ? "—" : a.sub);
 			Text(c, tx, y + int(H * 0.008f) + int(f * 1.35f), Fit(sub, sf, c.w - pad - inner - tx).c_str(), sf, dim);
 			y += rowH;
 		}
@@ -1143,11 +1150,11 @@ namespace
 		const float f = std::max(12.0f, H * 0.034f);
 		const int   n = int(g_galFiles.size());
 		const bool  confirm = s.galConfirm;
-		const int   bottom = n ? Prompts(c, { { "←→", "翻看" }, { "Enter", confirm ? "确认删除" : "删除" }, { "退格", "返回" } }) :
-		                         Prompts(c, { { "退格", "返回" } });
+		const int   bottom = n ? Prompts(c, { { "←→", Tr("翻看") }, { "Enter", confirm ? Tr("确认删除") : Tr("删除") }, { Tr("退格"), Tr("返回") } }) :
+		                         Prompts(c, { { Tr("退格"), Tr("返回") } });
 		if (!n || g_albums.empty()) {
-			const int y = Header(c, a_y, "相册");
-			TextCentered(c, c.w / 2, y + int(H * 0.15f), "这个相册是空的", std::max(16.0f, H * 0.05f), kText);
+			const int y = Header(c, a_y, Tr("相册"));
+			TextCentered(c, c.w / 2, y + int(H * 0.15f), Tr("这个相册是空的"), std::max(16.0f, H * 0.05f), kText);
 			return;
 		}
 		const auto& album = g_albums[std::clamp(s.albumSel, 0, int(g_albums.size()) - 1)];
@@ -1163,7 +1170,7 @@ namespace
 			const bool current = g_galImgPath == path && g_galImgMaxW == vw && g_galImgMaxH == vh;
 			if (current && !g_galLoading) {
 				if (g_galImg.empty()) {
-					TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "无法打开", f * 1.2f, kWarn);
+					TextCentered(c, c.w / 2, vy + vh / 2 - int(f), Tr("无法打开"), f * 1.2f, kWarn);
 				} else {
 					const int ox = vx + (vw - g_galImgW) / 2, oy = vy + (vh - g_galImgH) / 2;
 					for (int y = 0; y < g_galImgH && oy + y < c.h; ++y) {
@@ -1172,7 +1179,7 @@ namespace
 					}
 				}
 			} else {
-				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "加载中…", f * 1.2f, kDim);
+				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), Tr("加载中…"), f * 1.2f, kDim);
 				if (!g_galLoading) {
 					g_galLoading = true;
 					g_galImgPath = path;
@@ -1200,7 +1207,7 @@ namespace
 		}
 		Brackets(c, vx, vy, vw, vh, int(std::min(vw, vh) * 0.08f), 3, kText);
 		// source badge on the photo
-		const char* src = photo.source == Gallery::Source::kPhone ? "手机" : "拍照模式";
+		const char* src = photo.source == Gallery::Source::kPhone ? Tr("手机") : Tr("拍照模式");
 		const int   bw = TextWidth(src, f * 0.8f) + int(f * 0.8f);
 		Rect(c, vx + int(f * 0.5f), vy + int(f * 0.5f), bw, int(f * 1.3f), kBgTop, 0.8f);
 		Text(c, vx + int(f * 0.9f), vy + int(f * 0.62f), src, f * 0.8f, kText);
@@ -1211,7 +1218,7 @@ namespace
 		std::snprintf(count, sizeof(count), "%02d / %02d", idx + 1, n);
 		Text(c, pad, ty, count, f, kText);
 		if (confirm) {
-			const char* warn = "再按 Enter 删除（移到回收站）";
+			const char* warn = Tr("再按 Enter 删除（移到回收站）");
 			Text(c, c.w - pad - TextWidth(warn, f), ty, warn, f, kWarn);
 		} else {
 			const auto& cap = photo.tagged && !photo.geo.date.empty() ? photo.geo.date : photo.caption;
@@ -1219,13 +1226,13 @@ namespace
 		}
 		ty += int(f * 1.45f);
 		const auto place = photo.tagged ? Gallery::PlaceTitle(photo.geo) : std::string{};
-		std::string where = place.empty() ? "位置未知" : place;
-		if (photo.tagged && !photo.geo.system.empty()) where += "，" + photo.geo.system;
+		std::string where = place.empty() ? Tr("位置未知") : place;
+		if (photo.tagged && !photo.geo.system.empty()) where += Tr("，") + photo.geo.system;
 		Rect(c, pad, ty + int(f * 0.25f), int(f * 0.28f), int(f * 0.8f), place.empty() ? kDim : kStripe[1]);
 		Text(c, pad + int(f * 0.6f), ty, Fit(where, f, c.w - 2 * pad - int(f * 0.6f)).c_str(), f, place.empty() ? kDim : kText);
 		ty += int(f * 1.4f);
 		const auto gps = photo.tagged ? Gallery::GpsText(photo.geo) : std::string{};
-		Text(c, pad + int(f * 0.6f), ty, gps.empty() ? "GPS 无信号" : ("GPS  " + gps).c_str(), f * 0.85f, kDim);
+		Text(c, pad + int(f * 0.6f), ty, gps.empty() ? Tr("GPS 无信号") : ("GPS  " + gps).c_str(), f * 0.85f, kDim);
 	}
 
 	void DrawQuests(Canvas& c, const State& s, int a_y)
@@ -1235,54 +1242,84 @@ namespace
 		const float nameF = std::max(13.0f, H * 0.044f);
 		const float objF = std::max(11.0f, H * 0.035f);
 		const bool  any = g_questsLoaded && !g_quests.empty();
-		const int   first = any ? std::clamp(s.questScroll, 0, int(g_quests.size()) - 1) : 0;
-		const int   bottom = any ? Prompts(c, { { "↑↓", "选择" }, { "Enter", "详情" }, { "退格", "返回" } }) :
-		                           Prompts(c, { { "退格", "返回" } });
+		const int   selIdx = any ? std::clamp(s.questScroll, 0, int(g_quests.size()) - 1) : 0;
+		const int   bottom = any ? Prompts(c, { { "↑↓", Tr("选择") }, { "Enter", Tr("详情") }, { Tr("退格"), Tr("返回") } }) :
+		                           Prompts(c, { { Tr("退格"), Tr("返回") } });
 		char        note[32] = "";
 		if (any) {
-			std::snprintf(note, sizeof(note), "%d / %d", first + 1, int(g_quests.size()));
+			std::snprintf(note, sizeof(note), "%d / %d", selIdx + 1, int(g_quests.size()));
 		}
-		int y = Header(c, a_y, "任务", any ? note : nullptr);
+		int y = Header(c, a_y, Tr("任务"), any ? note : nullptr);
 		if (!g_questsLoaded) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", nameF, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), Tr("读取中…"), nameF, kDim);
 			return;
 		}
 		if (g_quests.empty()) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有进行中的任务", nameF, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), Tr("没有进行中的任务"), nameF, kDim);
 			return;
 		}
 		const int limit = bottom - int(H * 0.01f);
 		const int inner = int(W * 0.025f);  // text inset inside the selection block
-		int       shown = 0;
+		const int n = int(g_quests.size());
+		// layout of every quest: section header (where the type changes), wrapped name and objectives
+		struct Block
+		{
+			bool                                  header = false;
+			std::vector<std::string>              name;
+			std::vector<std::vector<std::string>> obj;
+			int                                   h = 0;  // name + objectives
+		};
+		std::vector<Block> blocks(std::size_t(n));
+		for (int i = 0; i < n; ++i) {
+			const auto& q = g_quests[i];
+			auto&       b = blocks[i];
+			b.name = Wrap(q.tracked ? "◆ " + q.name : q.name, nameF, c.w - 2 * pad - 2 * inner);
+			b.h = int(nameF * 1.3f) * int(b.name.size());
+			for (const auto& o : q.objectives) {
+				b.obj.push_back(Wrap(o, objF, c.w - 2 * pad - 2 * inner - int(objF * 1.2f)));
+				b.h += int(objF * 1.3f) * int(b.obj.back().size());
+			}
+		}
+		const int headerH = int(objF * 1.6f), gapH = int(H * 0.028f);
+		auto hasHeader = [&](int i, int a_first) { return !g_quests[i].group.empty() && (i == a_first || g_quests[i].group != g_quests[i - 1].group); };
+		// first quest shown: keep the previous one, scroll only as far as needed to show the selected quest whole
+		int first = std::clamp(g_questFirst, 0, selIdx);
+		for (;;) {
+			int h = 0;
+			for (int i = first; i <= selIdx; ++i) h += (hasHeader(i, first) ? headerH : 0) + blocks[i].h + (i < selIdx ? gapH : 0);
+			if (first >= selIdx || y + h <= limit) break;
+			++first;
+		}
+		g_questFirst = first;
+		// the selection box (slides between quests)
+		int selY = y;
+		for (int i = first; i < selIdx; ++i) selY += (hasHeader(i, first) ? headerH : 0) + blocks[i].h + gapH;
+		selY += hasHeader(selIdx, first) ? headerH : 0;
+		const FRect box = SelBox(kQuestsPage, { pad, selY - int(H * 0.008f), c.w - 2 * pad,
+		                                          std::min(blocks[selIdx].h, limit - selY) + int(H * 0.016f) });
+		Rect(c, int(std::lround(box.x)), int(std::lround(box.y)), int(std::lround(box.w)), int(std::lround(box.h)), kSelBg);
+		int shown = 0;
 		ListArea(y - int(H * 0.008f), limit + int(H * 0.008f));
-		for (int i = first; i < int(g_quests.size()); ++i) {
+		for (int i = first; i < n; ++i) {
 			const auto& q = g_quests[i];
 			RowMark(i, y);
 			// section header at the top of the page and wherever the quest type changes
-			if (!q.group.empty() && (i == first || q.group != g_quests[i - 1].group)) {
+			if (hasHeader(i, first)) {
 				if (shown > 0 && y + int(objF * 1.8f) + int(nameF * 1.3f) > limit) {
 					break;
 				}
 				Text(c, pad, y, q.group.c_str(), objF * 0.92f, kStripe[1]);
 				const int gw = TextWidth(q.group.c_str(), objF * 0.92f) + int(objF * 0.6f);
 				Rect(c, pad + gw, y + int(objF * 0.62f), c.w - 2 * pad - gw, 1, kLine);
-				y += int(objF * 1.6f);
+				y += headerH;
 			}
-			const std::string title = q.tracked ? "◆ " + q.name : q.name;
-			const auto        nameLines = Wrap(title, nameF, c.w - 2 * pad - 2 * inner);
+			const auto& nameLines = blocks[i].name;
+			const auto& objLines = blocks[i].obj;
+			const int   blockH = blocks[i].h;
 			if (shown > 0 && y + int(nameF * 1.3f) * int(nameLines.size()) > limit) {
 				break;
 			}
-			std::vector<std::vector<std::string>> objLines;
-			int                                   blockH = int(nameF * 1.3f) * int(nameLines.size());
-			for (const auto& o : q.objectives) {
-				objLines.push_back(Wrap(o, objF, c.w - 2 * pad - 2 * inner - int(objF * 1.2f)));
-				blockH += int(objF * 1.3f) * int(objLines.back().size());
-			}
-			const bool sel = i == first;
-			if (sel) {
-				Rect(c, pad, y - int(H * 0.008f), c.w - 2 * pad, std::min(blockH, limit - y) + int(H * 0.016f), kSelBg);
-			}
+			const bool sel = Covered(box, pad, y - int(H * 0.008f), c.w - 2 * pad, std::min(blockH, limit - y) + int(H * 0.016f));
 			const Rgb nameColor = sel ? kSelText : (q.tracked ? kGold : kText);
 			const Rgb objColor = sel ? Rgb{ 70, 76, 84 } : kDim;
 			for (const auto& l : nameLines) {
@@ -1319,19 +1356,19 @@ namespace
 		const float nameF = std::max(15.0f, H * 0.05f);
 		const float objF = std::max(11.0f, H * 0.037f);
 		if (g_quests.empty()) {
-			Prompts(c, { { "退格", "返回" } });
-			const int y = Header(c, a_y, "任务详情");
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有进行中的任务", nameF * 0.85f, kDim);
+			Prompts(c, { { Tr("退格"), Tr("返回") } });
+			const int y = Header(c, a_y, Tr("任务详情"));
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), Tr("没有进行中的任务"), nameF * 0.85f, kDim);
 			return;
 		}
 		const auto& q = g_quests[std::clamp(s.questScroll, 0, int(g_quests.size()) - 1)];
-		const int   bottom = Prompts(c, { { "↑↓", "滚动" }, { "Enter", q.tracked ? "取消追踪" : "追踪" }, { "退格", "返回" } });
-		int         y = Header(c, a_y, "任务详情", q.group.c_str());
+		const int   bottom = Prompts(c, { { "↑↓", Tr("滚动") }, { "Enter", q.tracked ? Tr("取消追踪") : Tr("追踪") }, { Tr("退格"), Tr("返回") } });
+		int         y = Header(c, a_y, Tr("任务详情"), q.group.c_str());
 		for (const auto& l : Wrap(q.name, nameF, c.w - 2 * pad)) {
 			Text(c, pad, y, l.c_str(), nameF, q.tracked ? kGold : kText);
 			y += int(nameF * 1.3f);
 		}
-		Text(c, pad, y + int(objF * 0.2f), q.tracked ? "◆ 正在追踪" : "未追踪", objF, q.tracked ? kGold : kDim);
+		Text(c, pad, y + int(objF * 0.2f), q.tracked ? Tr("◆ 正在追踪") : Tr("未追踪"), objF, q.tracked ? kGold : kDim);
 		y += int(objF * 1.9f);
 		Rect(c, pad, y, c.w - 2 * pad, 1, kLine);
 		y += int(H * 0.02f);
@@ -1367,15 +1404,15 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
-		const int   bottom = Prompts(c, { { "↑↓", "滚动" }, { "退格", "返回" } });
-		int         y = Header(c, a_y, kApps[s.openedApp].label);
+		const int   bottom = Prompts(c, { { "↑↓", Tr("滚动") }, { Tr("退格"), Tr("返回") } });
+		int         y = Header(c, a_y, Tr(kApps[s.openedApp].label));
 		const float f = std::max(13.0f, H * 0.042f);
 		if (g_infoPage != InfoFor(s.openedApp)) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", f, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), Tr("读取中…"), f, kDim);
 			return;
 		}
 		if (g_infoRows.empty()) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), s.openedApp == kAppShip ? "没有家园飞船" : s.openedApp == kAppOutposts ? "没有找到前哨站" : "暂无数据", f, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), s.openedApp == kAppShip ? Tr("没有家园飞船") : s.openedApp == kAppOutposts ? Tr("没有找到前哨站") : Tr("暂无数据"), f, kDim);
 			return;
 		}
 		const int limit = bottom - int(H * 0.01f);
@@ -1441,16 +1478,15 @@ namespace
 		return (y + y / 4 - y / 100 + y / 400 + t[m] + a_d) % 7;
 	}
 
-	constexpr const char* kWeekdays[] = { "日", "一", "二", "三", "四", "五", "六" };
 
 	void DrawCalendar(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
-		Prompts(c, { { "退格", "返回" } });
+		Prompts(c, { { Tr("退格"), Tr("返回") } });
 		char note[16];
-		std::snprintf(note, sizeof(note), "%u年", s.year);
-		int y = Header(c, a_y, "日历", note);
+		std::snprintf(note, sizeof(note), "%s", Lang::Year(s.year).c_str());
+		int y = Header(c, a_y, Tr("日历"), note);
 		const int year = int(s.year), m0 = int(s.month), day = int(s.day);
 		// time and the full date
 		char clock[16];
@@ -1459,13 +1495,13 @@ namespace
 		Text(c, pad, y, clock, clockF, kText);
 		y += int(clockF * 1.05f);
 		char date[64];
-		std::snprintf(date, sizeof(date), "%d年%d月%d日  星期%s", year, m0 + 1, day, kWeekdays[Weekday(year, m0, day)]);
+		std::snprintf(date, sizeof(date), "%s  %s", Lang::Date(unsigned(year), unsigned(m0), unsigned(day)).c_str(), Lang::WeekdayLong(Weekday(year, m0, day)));
 		const float dateF = std::max(13.0f, H * 0.038f);
 		Text(c, pad, y, date, dateF, kDim);
 		y += int(dateF * 1.8f);
 		// month grid
 		char month[16];
-		std::snprintf(month, sizeof(month), "%d月", m0 + 1);
+		std::snprintf(month, sizeof(month), "%s", Lang::Month(unsigned(m0)).c_str());
 		const float mf = std::max(13.0f, H * 0.042f);
 		Text(c, pad, y, month, mf, kStripe[1]);
 		const int mw = TextWidth(month, mf) + int(mf * 0.6f);
@@ -1475,7 +1511,7 @@ namespace
 		const float cf = std::max(11.0f, std::min(H * 0.036f, cellW * 0.42f));
 		const int   cellH = int(cf * 2.0f);
 		for (int i = 0; i < 7; ++i) {
-			TextCentered(c, pad + i * cellW + cellW / 2, y, kWeekdays[i], cf * 0.9f, i == 0 || i == 6 ? kStripe[1] : kDim);
+			TextCentered(c, pad + i * cellW + cellW / 2, y, Lang::WeekdayShort(i), cf * 0.9f, i == 0 || i == 6 ? kStripe[1] : kDim);
 		}
 		y += int(cf * 1.7f);
 		const int first = Weekday(year, m0, 1);
@@ -1497,18 +1533,18 @@ namespace
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
 		const int   n = int(g_messages.size());
-		const int   bottom = n ? Prompts(c, { { "↑↓", "滚动" }, { "Enter", s.msgConfirm ? "确认清除" : "全部清除" }, { "退格", "返回" } }) :
-		                         Prompts(c, { { "退格", "返回" } });
+		const int   bottom = n ? Prompts(c, { { "↑↓", Tr("滚动") }, { "Enter", s.msgConfirm ? Tr("确认清除") : Tr("全部清除") }, { Tr("退格"), Tr("返回") } }) :
+		                         Prompts(c, { { Tr("退格"), Tr("返回") } });
 		char note[16] = "";
 		if (n) {
-			std::snprintf(note, sizeof(note), "%d 条", n);
+			std::snprintf(note, sizeof(note), Tr("%d 条"), n);
 		}
-		int         y = Header(c, a_y, "消息", n ? note : nullptr);
+		int         y = Header(c, a_y, Tr("消息"), n ? note : nullptr);
 		const float textF = std::max(12.0f, H * 0.038f);
 		const float titleF = textF * 0.82f;
 		if (!n) {
-			TextCentered(c, c.w / 2, y + int(H * 0.12f), "没有消息", std::max(16.0f, H * 0.05f), kText);
-			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), "任务目标更新、升级会出现在这里", textF * 0.9f, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f), Tr("没有消息"), std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), Tr("任务目标更新、升级会出现在这里"), textF * 0.9f, kDim);
 			return;
 		}
 		const int limit = bottom - int(H * 0.01f);
@@ -1586,18 +1622,18 @@ namespace
 		const float H = float(c.h), W = float(c.w);
 		const int   pad = Pad(c);
 		const int   n = int(g_contacts.size());
-		const int   bottom = n ? Prompts(c, { { "↑↓", "选择" }, { "Enter", "呼叫" }, { "退格", "返回" } }) : Prompts(c, { { "退格", "返回" } });
+		const int   bottom = n ? Prompts(c, { { "↑↓", Tr("选择") }, { "Enter", Tr("呼叫") }, { Tr("退格"), Tr("返回") } }) : Prompts(c, { { Tr("退格"), Tr("返回") } });
 		char        note[16] = "";
-		if (n) std::snprintf(note, sizeof(note), "%d 人", n);
-		int         y = Header(c, a_y, "联系人", n ? note : nullptr);
+		if (n) std::snprintf(note, sizeof(note), Tr("%d 人"), n);
+		int         y = Header(c, a_y, Tr("联系人"), n ? note : nullptr);
 		const float f = std::max(13.0f, H * 0.042f), sf = f * 0.78f;
 		if (!g_contactsLoaded) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", f, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), Tr("读取中…"), f, kDim);
 			return;
 		}
 		if (!n) {
-			TextCentered(c, c.w / 2, y + int(H * 0.12f), "没有船员", std::max(16.0f, H * 0.05f), kText);
-			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), "分配到家园飞船的船员会出现在这里", sf, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f), Tr("没有船员"), std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), Tr("分配到家园飞船的船员会出现在这里"), sf, kDim);
 			return;
 		}
 		const int limit = bottom - int(H * 0.01f);
@@ -1624,7 +1660,7 @@ namespace
 			TextCentered(c, ax + av / 2, ay + int(av * 0.18f), ini.c_str(), av * 0.55f, kText);
 			const int tx = ax + av + inner;
 			Text(c, tx, y + int(H * 0.008f), Fit(ct.name, f, c.w - pad - inner - tx).c_str(), f, fg);
-			const std::string where = ct.dead ? "已阵亡" : ct.where;
+			const std::string where = ct.dead ? Tr("已阵亡") : ct.where;
 			Text(c, tx, y + int(H * 0.008f) + int(f * 1.35f), Fit(where, sf, c.w - pad - inner - tx).c_str(), sf,
 				ct.distance >= 0 && !on ? kStripe[3] : dim);
 			y += rowH;
@@ -1635,7 +1671,7 @@ namespace
 	{
 		const float H = float(c.h), W = float(c.w);
 		const auto& ct = g_callee;
-		Prompts(c, { { "Enter", ct.dead ? "—" : "叫过来" }, { "退格", "挂断" } });
+		Prompts(c, { { "Enter", ct.dead ? "—" : Tr("叫过来") }, { Tr("退格"), Tr("挂断") } });
 		const float big = std::max(18.0f, H * 0.065f), f = std::max(13.0f, H * 0.04f);
 		const int   av = int(std::min(W * 0.4f, H * 0.2f));
 		const int   cy = a_y + int(H * 0.1f) + av / 2;
@@ -1646,9 +1682,9 @@ namespace
 		int y = cy + av / 2 + int(av * 0.25f);
 		TextCentered(c, c.w / 2, y, Fit(ct.name, big, c.w - 2 * Pad(c)).c_str(), big, kText);
 		y += int(big * 1.5f);
-		TextCentered(c, c.w / 2, y, Fit(ct.dead ? "已阵亡" : ct.where, f, c.w - 2 * Pad(c)).c_str(), f, kDim);
+		TextCentered(c, c.w / 2, y, Fit(ct.dead ? Tr("已阵亡") : ct.where, f, c.w - 2 * Pad(c)).c_str(), f, kDim);
 		y += int(f * 2.2f);
-		const std::string status = ct.dead ? "无法接通" : (g_callResult.empty() ? "通话中…" : g_callResult);
+		const std::string status = ct.dead ? Tr("无法接通") : (g_callResult.empty() ? Tr("通话中…") : g_callResult);
 		TextCentered(c, c.w / 2, y, status.c_str(), f, ct.dead ? kWarn : kGold);
 	}
 
@@ -1657,7 +1693,7 @@ namespace
 		constexpr const char* dirs[] = { "前方", "右前", "右侧", "右后", "后方", "左后", "左侧", "左前" };
 		float deg = std::atan2(a_right, a_forward) * 57.2957795f;  // 0 = ahead, clockwise
 		if (deg < 0) deg += 360.0f;
-		return dirs[int((deg + 22.5f) / 45.0f) % 8];
+		return Tr(dirs[int((deg + 22.5f) / 45.0f) % 8]);
 	}
 
 	void DrawRadar(Canvas& c, const State& s, int a_y)
@@ -1666,13 +1702,13 @@ namespace
 		const int   pad = Pad(c);
 		const float range = kRadarRanges[std::clamp(s.radarRange, 0, int(std::size(kRadarRanges)) - 1)];
 		char        rangeLabel[32];
-		std::snprintf(rangeLabel, sizeof(rangeLabel), "范围 %.0f m", range);
-		const int bottom = Prompts(c, { { "←→", rangeLabel }, { "退格", "返回" } });
+		std::snprintf(rangeLabel, sizeof(rangeLabel), Tr("范围 %.0f m"), range);
+		const int bottom = Prompts(c, { { "←→", rangeLabel }, { Tr("退格"), Tr("返回") } });
 		int       hostile = 0;
 		for (const auto& b : g_blips) hostile += b.kind == 1;
 		char note[32] = "";
-		if (hostile) std::snprintf(note, sizeof(note), "敌对 %d", hostile);
-		int         y = Header(c, a_y, "扫描仪", hostile ? note : nullptr);
+		if (hostile) std::snprintf(note, sizeof(note), Tr("敌对 %d"), hostile);
+		int         y = Header(c, a_y, Tr("扫描仪"), hostile ? note : nullptr);
 		const float f = std::max(12.0f, H * 0.036f);
 		// radar disc
 		const float R = std::min((c.w - 2 * pad) * 0.48f, (bottom - y) * 0.3f);
@@ -1698,11 +1734,11 @@ namespace
 		Text(c, int(cx + R * 0.72f), int(cy - R), rl, f * 0.75f, kDim);
 		y = int(cy + R + H * 0.02f);
 		if (!g_radarLoaded) {
-			TextCentered(c, c.w / 2, y, "扫描中…", f, kDim);
+			TextCentered(c, c.w / 2, y, Tr("扫描中…"), f, kDim);
 			return;
 		}
 		if (g_blips.empty()) {
-			TextCentered(c, c.w / 2, y, "附近没有发现生命体", f, kDim);
+			TextCentered(c, c.w / 2, y, Tr("附近没有发现生命体"), f, kDim);
 			return;
 		}
 		// nearest contacts
@@ -1736,21 +1772,21 @@ namespace
 		const auto  m = Music::Get();
 		const int   n = int(m.titles.size());
 		const bool  playing = m.playing && m.index >= 0;
-		const int   bottom = n ? Prompts(c, { { "←→", "切歌" }, { "Enter", playing ? "暂停" : "播放" }, { "↑↓", "音量" }, { "退格", "返回" } }) :
-		                         Prompts(c, { { "退格", "返回" } });
+		const int   bottom = n ? Prompts(c, { { "←→", Tr("切歌") }, { "Enter", playing ? Tr("暂停") : Tr("播放") }, { "↑↓", Tr("音量") }, { Tr("退格"), Tr("返回") } }) :
+		                         Prompts(c, { { Tr("退格"), Tr("返回") } });
 		char        note[32] = "";
 		if (n) std::snprintf(note, sizeof(note), "%d / %d", std::max(0, m.index) + 1, n);
-		int         y = Header(c, a_y, "音乐", n ? note : nullptr);
+		int         y = Header(c, a_y, Tr("音乐"), n ? note : nullptr);
 		const float f = std::max(13.0f, H * 0.042f), sf = f * 0.8f;
 		if (!n) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有音乐", std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), Tr("没有音乐"), std::max(16.0f, H * 0.05f), kText);
 			int ty = y + int(H * 0.1f) + int(H * 0.08f);
-			for (const auto& l : Wrap("把 mp3 / wav / wma 文件放进这个文件夹，再打开音乐：", sf, c.w - 2 * pad)) {
+			for (const auto& l : Wrap(Tr("把 mp3 / wav / wma 文件放进这个文件夹，再打开音乐："), sf, c.w - 2 * pad)) {
 				TextCentered(c, c.w / 2, ty, l.c_str(), sf, kDim);
 				ty += int(sf * 1.4f);
 			}
 			ty += int(sf * 0.4f);
-			for (const auto& l : Wrap(m.folder.empty() ? "文档\\My Games\\Starfield\\PhoneMusic" : m.folder, sf * 0.9f, c.w - 2 * pad)) {
+			for (const auto& l : Wrap(m.folder.empty() ? Tr("文档\\My Games\\Starfield\\PhoneMusic") : m.folder, sf * 0.9f, c.w - 2 * pad)) {
 				TextCentered(c, c.w / 2, ty, l.c_str(), sf * 0.9f, kStripe[1]);
 				ty += int(sf * 1.3f);
 			}
@@ -1762,7 +1798,7 @@ namespace
 		Rect(c, cx0, cy0, side, side, kPanel, 0.95f);
 		Frame(c, cx0, cy0, side, side, 1, kLine);
 		if (HasIcon(0xE8D6)) Icon(c, cx0 + side / 2, cy0 + side / 2, 0xE8D6, side * 0.38f, playing ? kText : kDim);
-		else TextCentered(c, cx0 + side / 2, cy0 + side / 2 - int(side * 0.2f), "乐", side * 0.36f, playing ? kText : kDim);
+		else TextCentered(c, cx0 + side / 2, cy0 + side / 2 - int(side * 0.2f), Tr("乐"), side * 0.36f, playing ? kText : kDim);
 		const int bw = std::max(3, side / 40), gap = std::max(2, bw / 2);
 		Stripes(c, cx0 + side / 14, cy0 + side - side / 14 - side / 5, bw, side / 5, gap);
 		y = cy0 + side + int(H * 0.025f);
@@ -1770,7 +1806,7 @@ namespace
 		const std::string title = m.index >= 0 ? m.titles[m.index] : m.titles[0];
 		TextCentered(c, c.w / 2, y, Fit(title, f * 1.1f, c.w - 2 * pad).c_str(), f * 1.1f, kText);
 		y += int(f * 1.55f);
-		const std::string state = !m.error.empty() ? m.error : m.index < 0 ? "未播放" : playing ? "正在播放" : "已暂停";
+		const std::string state = !m.error.empty() ? m.error : m.index < 0 ? Tr("未播放") : playing ? Tr("正在播放") : Tr("已暂停");
 		TextCentered(c, c.w / 2, y, Fit(state, sf, c.w - 2 * pad).c_str(), sf, !m.error.empty() ? kWarn : playing ? kStripe[1] : kDim);
 		y += int(sf * 1.8f);
 		// progress
@@ -1791,7 +1827,7 @@ namespace
 		Rect(c, mid - bs / 2, by, bs, bs, kSelBg);
 		const int playIcon = playing ? 0xE769 : 0xE768;
 		if (HasIcon(playIcon)) Icon(c, mid, by + bs / 2, playIcon, bs * 0.5f, kSelText);
-		else TextCentered(c, mid, by + int(bs * 0.2f), playing ? "停" : "播", bs * 0.5f, kSelText);
+		else TextCentered(c, mid, by + int(bs * 0.2f), playing ? Tr("停") : Tr("播"), bs * 0.5f, kSelText);
 		const int side2 = int(bs * 1.6f);
 		for (int k = 0; k < 2; ++k) {
 			const int ccx = k == 0 ? mid - side2 : mid + side2;
@@ -1803,9 +1839,9 @@ namespace
 		y = by + bs + int(H * 0.025f);
 		// volume
 		char vol[16];
-		std::snprintf(vol, sizeof(vol), "音量 %d%%", m.volume);
+		std::snprintf(vol, sizeof(vol), Tr("音量 %d%%"), m.volume);
 		Text(c, pad, y, vol, sf, kDim);
-		const int vx = pad + TextWidth("音量 100%", sf) + int(sf);
+		const int vx = pad + TextWidth(Tr("音量 100%"), sf) + int(sf);
 		const int vy = y + int(sf * 0.55f);
 		Rect(c, vx, vy, c.w - pad - vx, barH, kPanel);
 		Rect(c, vx, vy, int((c.w - pad - vx) * m.volume / 100.0f), barH, kText);
@@ -1813,8 +1849,8 @@ namespace
 		// up next
 		const int limit = bottom - int(H * 0.01f);
 		if (n > 1 && y + int(sf * 1.6f) * 2 <= limit) {
-			Text(c, pad, y, "接下来", sf * 0.92f, kStripe[1]);
-			const int gw = TextWidth("接下来", sf * 0.92f) + int(sf * 0.6f);
+			Text(c, pad, y, Tr("接下来"), sf * 0.92f, kStripe[1]);
+			const int gw = TextWidth(Tr("接下来"), sf * 0.92f) + int(sf * 0.6f);
 			Rect(c, pad + gw, y + int(sf * 0.6f), c.w - 2 * pad - gw, 1, kLine);
 			y += int(sf * 1.6f);
 			for (int k = 1; k < n && y + int(sf * 1.45f) <= limit; ++k) {
@@ -1829,9 +1865,9 @@ namespace
 	void DrawPlaceholder(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h);
-		Prompts(c, { { "退格", "返回" } });
-		const int y = Header(c, a_y, kApps[s.openedApp].label);
-		TextCentered(c, c.w / 2, y + int(H * 0.14f), "即将推出", std::max(16.0f, H * 0.055f), kDim);
+		Prompts(c, { { Tr("退格"), Tr("返回") } });
+		const int y = Header(c, a_y, Tr(kApps[s.openedApp].label));
+		TextCentered(c, c.w / 2, y + int(H * 0.14f), Tr("即将推出"), std::max(16.0f, H * 0.055f), kDim);
 	}
 
 	int Depth(int a_page)
@@ -2029,6 +2065,7 @@ namespace Ui
 				st.msgConfirm = false;
 				if (st.page == kQuestsPage) {
 					g_questsLoaded = false;
+					g_questFirst = 0;
 				}
 				if (st.page == kInfoPage) {
 					g_infoPage = Ui::Info::kNone;  // "loading" until the game thread fills it
@@ -2071,8 +2108,11 @@ namespace Ui
 					st.openKey = (st.openKey + dir + k) % k;
 				} else if (st.setSel == 2) {
 					st.sound = !st.sound;
-				} else {
+				} else if (st.setSel == 3) {
 					st.vibration = !st.vibration;
+				} else {
+					st.language = (st.language + dir + 3) % 3;  // auto / 中文 / English
+					Lang::SetMode(st.language);
 				}
 				act = Action::kSettingsChanged;
 				break;
@@ -2256,7 +2296,7 @@ namespace Ui
 					return Action::kNone;
 				}
 				act = Action::kSummonContact;
-				g_callResult = "正在请求…";
+				g_callResult = Tr("正在请求…");
 			} else if (a_key == Key::kBack) {
 				st.page = kContactsPage;
 			} else {
@@ -2436,7 +2476,7 @@ namespace Ui
 		char            stamp[48];
 		char            clock[16];
 		ClockText(g_state, clock);
-		std::snprintf(stamp, sizeof(stamp), "%u月%u日 %s", g_state.month + 1, g_state.day, clock);
+		std::snprintf(stamp, sizeof(stamp), "%s %s", Lang::MonthDay(g_state.month, g_state.day).c_str(), clock);
 		g_bannerTitle = a_title;
 		g_bannerText = a_text;
 		g_bannerUntil = std::chrono::steady_clock::now() + std::chrono::seconds(4);
@@ -2490,7 +2530,7 @@ namespace Ui
 	Settings GetSettings()
 	{
 		std::lock_guard lk(g_lock);
-		return { g_state.brightness, g_state.openKey, g_state.sound, g_state.vibration, g_state.musicVolume };
+		return { g_state.brightness, g_state.openKey, g_state.sound, g_state.vibration, g_state.musicVolume, g_state.language };
 	}
 
 	void SetSettings(const Settings& a_settings)
@@ -2501,6 +2541,8 @@ namespace Ui
 		g_state.sound = a_settings.sound;
 		g_state.vibration = a_settings.vibration;
 		g_state.musicVolume = std::clamp(a_settings.musicVolume, 0, 100);
+		g_state.language = std::clamp(a_settings.language, 0, 2);
+		Lang::SetMode(g_state.language);
 		Music::SetVolume(g_state.musicVolume);
 		++g_version;
 	}

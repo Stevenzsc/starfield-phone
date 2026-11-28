@@ -10,6 +10,7 @@
 // The quest name: the TESFullName component, found once by scanning a quest for TESFullName's vtable.
 
 #include "pch.h"
+#include "lang.h"
 #include "quests.h"
 
 #include <algorithm>
@@ -213,7 +214,7 @@ namespace Quests
 			entry.formID = q->GetFormID();
 			entry.tracked = (Read<std::uint32_t>(q, kQuestFlags) & kTrackedBit) != 0;
 			const auto* type = TypeOf(q);
-			entry.group = type ? type->label : "其他";
+			entry.group = Tr(type ? type->label : "其他");
 			const auto prio = Read<std::uint8_t>(q, kDnamPriority);
 			if (type && type->keyword == kActivities) {
 				// Activities are "pointer" quests whose name is a developer placeholder (e.g. "霓虹城Z01的封装" =
@@ -283,11 +284,11 @@ namespace Quests
 				const int   now = ShownState(state), was = ShownState(before);
 				const char* what = nullptr;
 				if (now == 1 && was != 1) {
-					what = "新目标：";
+					what = Tr("新目标：");
 				} else if (now == 2 && was != 2) {
-					what = "已完成：";
+					what = Tr("已完成：");
 				} else if (now == 3 && was != 3) {
-					what = "已失败：";
+					what = Tr("已失败：");
 				}
 				if (!what || !baseline || a_silent) {
 					continue;
@@ -297,9 +298,9 @@ namespace Quests
 					continue;
 				}
 				const auto* type = TypeOf(q);
-				std::string title = type && type->keyword == kActivities ? std::string(type->label) : Clean(QuestName(q));
+				std::string title = type && type->keyword == kActivities ? std::string(Tr(type->label)) : Clean(QuestName(q));
 				if (title.empty()) {
-					title = "任务";
+					title = Tr("任务");
 				}
 				changes.push_back({ std::move(title), what + text });
 			}

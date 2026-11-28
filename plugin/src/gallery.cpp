@@ -1,6 +1,7 @@
 // Photo folders, location tags and decoding for the Camera and Gallery apps.
 
 #include "gallery.h"
+#include "lang.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -226,8 +227,8 @@ namespace Gallery
 	{
 		if (!a_geo.gps) return {};
 		char buf[96];
-		std::snprintf(buf, sizeof(buf), "%s %.3f°  %s %.3f°", a_geo.lat >= 0 ? "北纬" : "南纬", std::fabs(a_geo.lat),
-			a_geo.lon >= 0 ? "东经" : "西经", std::fabs(a_geo.lon));
+		std::snprintf(buf, sizeof(buf), "%s %.3f°  %s %.3f°", a_geo.lat >= 0 ? Tr("北纬") : Tr("南纬"), std::fabs(a_geo.lat),
+			a_geo.lon >= 0 ? Tr("东经") : Tr("西经"), std::fabs(a_geo.lon));
 		return buf;
 	}
 

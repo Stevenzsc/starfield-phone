@@ -1,6 +1,7 @@
 // Music app playback: MCI ("mpegvideo" = DirectShow, so whatever codecs Windows has) on a worker thread.
 
 #include "music.h"
+#include "lang.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -124,7 +125,7 @@ namespace
 			bool      ok = false;
 			Mci(L"open \"" + files[i] + L"\" type mpegvideo alias " + kAlias, &ok);
 			if (!ok) {
-				error = "无法播放 " + Utf8(std::filesystem::path(files[i]).filename().wstring());
+				error = Tr("无法播放 ") + Utf8(std::filesystem::path(files[i]).filename().wstring());
 				continue;
 			}
 			g_open = true;

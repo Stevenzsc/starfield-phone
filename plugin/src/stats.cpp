@@ -15,6 +15,7 @@
 //   GetFullName                   ID 47496   const char* (form)            ("" when the form has no name)
 
 #include "pch.h"
+#include "lang.h"
 #include "stats.h"
 
 #include <algorithm>
@@ -152,7 +153,7 @@ namespace
 		const auto loc = LocationName(a_ref);
 		if (planet.empty()) return loc.empty() ? "—" : loc;
 		if (loc.empty() || loc == planet) return planet;
-		return loc + "，" + planet;
+		return loc + Tr("，") + planet;
 	}
 }
 
@@ -186,10 +187,10 @@ namespace Stats
 		const float xpNext = xpFor(std::uint32_t(level + 1));
 
 		const auto name = RefName(p);
-		rows.push_back({ "姓名", name.empty() ? "—" : name });
-		rows.push_back({ "等级", std::to_string(level) });
+		rows.push_back({ Tr("姓名"), name.empty() ? "—" : name });
+		rows.push_back({ Tr("等级"), std::to_string(level) });
 		// Experience may be the running total (>= the level's threshold) or the progress inside the level
-		Ui::InfoRow xpRow{ "经验" };
+		Ui::InfoRow xpRow{ Tr("经验") };
 		if (std::isfinite(xp) && xpNext > xpThis) {
 			const float into = xp >= xpThis ? xp - xpThis : xp;
 			xpRow.value = Num(into) + " / " + Num(xpNext - xpThis);
@@ -198,11 +199,11 @@ namespace Stats
 			xpRow.value = Num(xp);
 		}
 		rows.push_back(xpRow);
-		rows.push_back({ "信用点", std::to_string(credits) });
-		rows.push_back(Header("状态"));
-		rows.push_back(Gauge("生命", Value(p, kAvHealth), Value(p, kAvHealth, true)));
-		rows.push_back(Gauge("氧气", Value(p, kAvOxygen), Value(p, kAvOxygen, true)));
-		rows.push_back({ "负重上限", Num(Value(p, kAvCarryWeight)) + " kg" });
+		rows.push_back({ Tr("信用点"), std::to_string(credits) });
+		rows.push_back(Header(Tr("状态")));
+		rows.push_back(Gauge(Tr("生命"), Value(p, kAvHealth), Value(p, kAvHealth, true)));
+		rows.push_back(Gauge(Tr("氧气"), Value(p, kAvOxygen), Value(p, kAvOxygen, true)));
+		rows.push_back({ Tr("负重上限"), Num(Value(p, kAvCarryWeight)) + " kg" });
 
 		static bool logged = false;
 		if (!logged) {
@@ -223,19 +224,19 @@ namespace Stats
 		}
 		void*      s = ship.ref;
 		const auto name = RefName(s);
-		rows.push_back({ "名称", name.empty() ? "—" : name });
-		rows.push_back({ "位置", Place(s) });
-		rows.push_back(Header("状态"));
-		rows.push_back(Gauge("船体", Value(s, kAvHealth), Value(s, kAvHealth, true)));
+		rows.push_back({ Tr("名称"), name.empty() ? "—" : name });
+		rows.push_back({ Tr("位置"), Place(s) });
+		rows.push_back(Header(Tr("状态")));
+		rows.push_back(Gauge(Tr("船体"), Value(s, kAvHealth), Value(s, kAvHealth, true)));
 		const float shieldMax = Value(s, kAvShieldMaxHealth);
-		rows.push_back(Gauge("护盾", Value(s, kAvShieldHealth), shieldMax));
-		rows.push_back(Gauge("跃迁燃料", Value(s, kAvGravJumpFuel), Value(s, kAvGravJumpFuel, true)));
-		rows.push_back(Header("性能"));
-		rows.push_back({ "跃迁距离", Num(JumpRange(s)) + " 光年" });
-		rows.push_back({ "货舱容量", Num(Value(s, kAvCarryWeight)) + " kg" });
-		rows.push_back({ "反应堆", Num(Value(s, kAvMaxPower)) });
-		rows.push_back({ "船员", Num(Value(s, kAvCrew)) });
-		rows.push_back({ "乘客舱位", Num(Value(s, kAvPassengerSlots)) });
+		rows.push_back(Gauge(Tr("护盾"), Value(s, kAvShieldHealth), shieldMax));
+		rows.push_back(Gauge(Tr("跃迁燃料"), Value(s, kAvGravJumpFuel), Value(s, kAvGravJumpFuel, true)));
+		rows.push_back(Header(Tr("性能")));
+		rows.push_back({ Tr("跃迁距离"), Num(JumpRange(s)) + Tr(" 光年") });
+		rows.push_back({ Tr("货舱容量"), Num(Value(s, kAvCarryWeight)) + " kg" });
+		rows.push_back({ Tr("反应堆"), Num(Value(s, kAvMaxPower)) });
+		rows.push_back({ Tr("船员"), Num(Value(s, kAvCrew)) });
+		rows.push_back({ Tr("乘客舱位"), Num(Value(s, kAvPassengerSlots)) });
 
 		static bool logged = false;
 		if (!logged) {
@@ -260,21 +261,21 @@ namespace Stats
 		using ship_t = void* (*)(void*, bool);
 		void* aboard = reinterpret_cast<ship_t>(kGetSpaceship.address())(p, true);
 		const auto geo = CurrentGeo();
-		rows.push_back(Header("当前位置"));
-		rows.push_back({ "星系", geo.system.empty() ? "—" : geo.system });
-		rows.push_back({ "星球", planet.empty() ? "太空" : planet });
-		rows.push_back({ "地点", loc.empty() ? "—" : loc });
-		rows.push_back({ "状态", aboard ? "在飞船上" : (planet.empty() ? "太空中" : "地面") });
-		rows.push_back({ "GPS", geo.gps ? Gallery::GpsText(geo) : "无信号" });
-		rows.push_back(Header("家园飞船"));
+		rows.push_back(Header(Tr("当前位置")));
+		rows.push_back({ Tr("星系"), geo.system.empty() ? "—" : geo.system });
+		rows.push_back({ Tr("星球"), planet.empty() ? Tr("太空") : planet });
+		rows.push_back({ Tr("地点"), loc.empty() ? "—" : loc });
+		rows.push_back({ Tr("状态"), aboard ? Tr("在飞船上") : (planet.empty() ? Tr("太空中") : Tr("地面")) });
+		rows.push_back({ "GPS", geo.gps ? Gallery::GpsText(geo) : Tr("无信号") });
+		rows.push_back(Header(Tr("家园飞船")));
 		{
 			HomeShip ship;
 			if (ship.ref) {
 				const auto name = RefName(ship.ref);
-				rows.push_back({ "飞船", name.empty() ? "—" : name });
-				rows.push_back({ "停靠", Place(ship.ref) });
+				rows.push_back({ Tr("飞船"), name.empty() ? "—" : name });
+				rows.push_back({ Tr("停靠"), Place(ship.ref) });
 			} else {
-				rows.push_back({ "飞船", "—" });
+				rows.push_back({ Tr("飞船"), "—" });
 			}
 		}
 		static bool logged = false;
@@ -511,9 +512,8 @@ namespace Stats
 			const float    h = cal->GetHour();
 			const unsigned y = cal->GetYear() < 1000 ? cal->GetYear() + 2000 : cal->GetYear();
 			char           buf[64];
-			std::snprintf(buf, sizeof(buf), "%u年%u月%u日 %02d:%02d", y, unsigned(cal->GetMonth() + 1), unsigned(cal->GetDay()),
-				int(h) % 24, int((h - std::floor(h)) * 60.0f) % 60);
-			g.date = buf;
+			std::snprintf(buf, sizeof(buf), " %02d:%02d", int(h) % 24, int((h - std::floor(h)) * 60.0f) % 60);
+			g.date = Lang::Date(y, unsigned(cal->GetMonth()), unsigned(cal->GetDay())) + buf;
 		}
 		return g;
 	}
@@ -543,12 +543,12 @@ namespace Stats
 			Ui::Contact c;
 			c.formID = FormID(a.ref);
 			c.name = RefName(a.ref);
-			if (c.name.empty()) c.name = "船员";
+			if (c.name.empty()) c.name = Tr("船员");
 			c.dead = IsDead(a.ref);
 			const bool loaded = std::find(high.begin(), high.end(), h) != high.end();
 			if (loaded && PlanetOf(a.ref) == myPlanet) {
 				c.distance = Distance(PosOf(a.ref), me);
-				c.where = "附近 " + Meters(c.distance);
+				c.where = Tr("附近 ") + Meters(c.distance);
 			} else {
 				c.where = Place(a.ref);
 			}
@@ -596,7 +596,7 @@ namespace Stats
 			if (!(d <= a_range)) continue;
 			Ui::Blip b;
 			b.name = RefName(a.ref);
-			if (b.name.empty()) b.name = "未知";
+			if (b.name.empty()) b.name = Tr("未知");
 			b.right = dx * c - dy * s;
 			b.forward = dx * s + dy * c;
 			b.distance = d;
@@ -630,15 +630,15 @@ namespace Stats
 			const char* dn = ref->GetDisplayFullName();
 			std::string name = dn && *dn ? dn : RefName(ref);
 			++n;
-			if (name.empty()) name = "前哨站 " + std::to_string(n);
+			if (name.empty()) name = Tr("前哨站 ") + std::to_string(n);
 			void*      planet = PlanetOf(ref);
 			const auto planetName = Name(planet);
 			const auto chain = LocationChain(ref);
 			rows.push_back({ name, "", -1.0f, true });
-			rows.push_back({ "星球", planetName.empty() ? "—" : planetName });
-			if (!chain.empty() && !chain[0].empty() && chain[0] != planetName) rows.push_back({ "地点", chain[0] });
+			rows.push_back({ Tr("星球"), planetName.empty() ? "—" : planetName });
+			if (!chain.empty() && !chain[0].empty() && chain[0] != planetName) rows.push_back({ Tr("地点"), chain[0] });
 			if (p && planet && planet == myPlanet && !Interior(p)) {
-				rows.push_back({ "距离", Meters(Distance(PosOf(ref), PosOf(p))) });
+				rows.push_back({ Tr("距离"), Meters(Distance(PosOf(ref), PosOf(p))) });
 			}
 		}
 		return rows;
