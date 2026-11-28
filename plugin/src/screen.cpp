@@ -75,13 +75,25 @@ namespace
 	std::atomic_uint32_t g_writes{ 0 };
 
 	// second-view render texture (viewprobe.cpp), found by its unique size; any format
-	std::uint32_t   g_viewW = 0, g_viewH = 0;
-	ID3D12Resource* g_viewTarget = nullptr;  // AddRef'd, guarded by g_lock
+	// Armed right before the texture is created: only the next matching RGBA8 texture is ours. The render graph then
+	// allocates its own intermediates of the same size in aliased heaps; those must not be touched (adding flags to
+	// them crashed the game).
+	std::uint32_t    g_viewW = 0, g_viewH = 0;
+	std::atomic_bool g_viewArmed{ false };
+	ID3D12Resource*  g_viewTarget = nullptr;  // AddRef'd, guarded by g_lock
 
-	bool IsViewDesc(UINT64 a_width, UINT a_height, D3D12_RESOURCE_DIMENSION a_dim, D3D12_RESOURCE_FLAGS a_flags, UINT a_samples)
+	bool IsViewDesc(UINT64 a_width, UINT a_height, D3D12_RESOURCE_DIMENSION a_dim, D3D12_RESOURCE_FLAGS a_flags, UINT a_samples,
+		DXGI_FORMAT a_fmt)
 	{
-		return g_viewW && a_dim == D3D12_RESOURCE_DIMENSION_TEXTURE2D && a_width == g_viewW && a_height == g_viewH &&
-		       a_samples <= 1 && !(a_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+		if (!g_viewArmed.load() || a_dim != D3D12_RESOURCE_DIMENSION_TEXTURE2D || a_width != g_viewW || a_height != g_viewH ||
+			a_samples > 1 || (a_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+			return false;
+		}
+		if (a_fmt != DXGI_FORMAT_R8G8B8A8_TYPELESS && a_fmt != DXGI_FORMAT_R8G8B8A8_UNORM && a_fmt != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
+			return false;
+		}
+		bool expected = true;
+		return g_viewArmed.compare_exchange_strong(expected, false);  // first match only
 	}
 
 	void CaptureView(const char* a_via, void** a_out, DXGI_FORMAT a_fmt, D3D12_RESOURCE_FLAGS a_flags)
@@ -131,13 +143,13 @@ namespace
 		D3D12_HEAP_FLAGS a_flags, const D3D12_RESOURCE_DESC* a_desc, D3D12_RESOURCE_STATES a_state,
 		const D3D12_CLEAR_VALUE* a_clear, REFIID a_riid, void** a_out)
 	{
-		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count)) {
+		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count, a_desc->Format)) {
 			D3D12_RESOURCE_DESC desc = *a_desc;
 			desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 			auto hr = g_createCommitted(a_this, a_heap, a_flags, &desc, a_state, a_clear, a_riid, a_out);
 			if (FAILED(hr)) {
 				hr = g_createCommitted(a_this, a_heap, a_flags, a_desc, a_state, a_clear, a_riid, a_out);
-				if (SUCCEEDED(hr)) CaptureView("CreateCommittedResource (no simultaneous)", a_out, a_desc->Format, a_desc->Flags);
+				if (SUCCEEDED(hr)) Log("view target via CreateCommittedResource would not take simultaneous access; not used");
 				return hr;
 			}
 			CaptureView("CreateCommittedResource", a_out, desc.Format, desc.Flags);
@@ -159,13 +171,13 @@ namespace
 		const D3D12_RESOURCE_DESC* a_desc, D3D12_RESOURCE_STATES a_state, const D3D12_CLEAR_VALUE* a_clear,
 		REFIID a_riid, void** a_out)
 	{
-		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count)) {
+		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count, a_desc->Format)) {
 			D3D12_RESOURCE_DESC desc = *a_desc;
 			desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 			auto hr = g_createPlaced(a_this, a_heap, a_offset, &desc, a_state, a_clear, a_riid, a_out);
 			if (FAILED(hr)) {
 				hr = g_createPlaced(a_this, a_heap, a_offset, a_desc, a_state, a_clear, a_riid, a_out);
-				if (SUCCEEDED(hr)) CaptureView("CreatePlacedResource (no simultaneous)", a_out, a_desc->Format, a_desc->Flags);
+				if (SUCCEEDED(hr)) Log("view target via CreatePlacedResource would not take simultaneous access; not used");
 				return hr;
 			}
 			CaptureView("CreatePlacedResource", a_out, desc.Format, desc.Flags);
@@ -194,13 +206,13 @@ namespace
 		const D3D12_RESOURCE_DESC1* a_desc, D3D12_RESOURCE_STATES a_state, const D3D12_CLEAR_VALUE* a_clear,
 		REFIID a_riid, void** a_out)
 	{
-		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count)) {
+		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count, a_desc->Format)) {
 			D3D12_RESOURCE_DESC1 desc = *a_desc;
 			desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 			auto hr = g_createPlaced1(a_this, a_heap, a_offset, &desc, a_state, a_clear, a_riid, a_out);
 			if (FAILED(hr)) {
 				hr = g_createPlaced1(a_this, a_heap, a_offset, a_desc, a_state, a_clear, a_riid, a_out);
-				if (SUCCEEDED(hr)) CaptureView("CreatePlacedResource1 (no simultaneous)", a_out, a_desc->Format, a_desc->Flags);
+				if (SUCCEEDED(hr)) Log("view target via CreatePlacedResource1 would not take simultaneous access; not used");
 				return hr;
 			}
 			CaptureView("CreatePlacedResource1", a_out, desc.Format, desc.Flags);
@@ -222,13 +234,13 @@ namespace
 		const D3D12_RESOURCE_DESC1* a_desc, D3D12_BARRIER_LAYOUT a_layout, const D3D12_CLEAR_VALUE* a_clear,
 		UINT32 a_numCastable, const DXGI_FORMAT* a_castable, REFIID a_riid, void** a_out)
 	{
-		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count)) {
+		if (a_desc && IsViewDesc(a_desc->Width, a_desc->Height, a_desc->Dimension, a_desc->Flags, a_desc->SampleDesc.Count, a_desc->Format)) {
 			D3D12_RESOURCE_DESC1 desc = *a_desc;
 			desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 			auto hr = g_createPlaced2(a_this, a_heap, a_offset, &desc, a_layout, a_clear, a_numCastable, a_castable, a_riid, a_out);
 			if (FAILED(hr)) {
 				hr = g_createPlaced2(a_this, a_heap, a_offset, a_desc, a_layout, a_clear, a_numCastable, a_castable, a_riid, a_out);
-				if (SUCCEEDED(hr)) CaptureView("CreatePlacedResource2 (no simultaneous)", a_out, a_desc->Format, a_desc->Flags);
+				if (SUCCEEDED(hr)) Log("view target via CreatePlacedResource2 would not take simultaneous access; not used");
 				return hr;
 			}
 			CaptureView("CreatePlacedResource2", a_out, desc.Format, desc.Flags);
@@ -484,6 +496,11 @@ namespace Screen
 	{
 		g_viewW = a_width;
 		g_viewH = a_height;
+	}
+
+	void ArmViewTarget()
+	{
+		g_viewArmed = true;
 	}
 
 	ID3D12Resource* ViewTarget()

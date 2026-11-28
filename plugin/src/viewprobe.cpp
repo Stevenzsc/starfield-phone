@@ -4,6 +4,7 @@
 
 #include "pch.h"
 #include "viewprobe.h"
+#include "screen.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -395,6 +396,7 @@ namespace
 		d[12] = 0x05040302;
 		d[14] = 1;
 		std::uintptr_t r = 0;
+		Screen::ArmViewTarget();
 		if (!Call(kCreateTexture, A(&name.s), A(d), A(&g_texture), 0, &r)) {
 			REX::ERROR("view2: texture creation faulted");
 			return false;
@@ -468,7 +470,7 @@ namespace ViewProbe
 				return;
 			}
 			{
-				// portrait frustum for the phone target: { left, right, top, bottom }, 60 degrees vertical
+				// frustum matching the target's aspect: { left, right, top, bottom }, 60 degrees vertical
 				const auto  cam = *reinterpret_cast<std::uintptr_t*>(g_obj + 0x18);
 				const float t = 0.57735f;  // tan(30 deg)
 				const float x = t * float(ViewProbe::kTargetWidth) / float(ViewProbe::kTargetHeight);
