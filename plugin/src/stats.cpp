@@ -546,7 +546,7 @@ namespace Stats
 			Ui::Contact c;
 			c.formID = FormID(a.ref);
 			c.name = RefName(a.ref);
-			if (c.name.empty()) c.name = Tr("船员");
+			if (c.name.empty() || c.name == "Crew" || c.name == "船员") continue;  // unnamed (generic or temporary) followers
 			c.dead = IsDead(a.ref);
 			const bool loaded = std::find(high.begin(), high.end(), h) != high.end();
 			if (loaded && PlanetOf(a.ref) == myPlanet) {
