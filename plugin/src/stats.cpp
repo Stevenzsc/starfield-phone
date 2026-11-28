@@ -319,6 +319,9 @@ namespace
 	constexpr REL::ID kPlayMenuSound{ 114814 };   // WwiseEvent.PlayMenuSound(string) global, Starfield.exe+0x1F0AB40
 	constexpr REL::ID kShakeController{ 117449 }; // Game.ShakeController(float, float, float), Starfield.exe+0x200FCA0
 	constexpr REL::ID kAllForms{ 883341 };
+	// Outpost beacon data (ExtraData type 0xBC; MatchOutpostName FUN_142077350 writes the name at +0x70, a
+	// BSFixedString). FUN_140F51350(ref, create): with create = false a plain lookup, nullptr when not a beacon or none.
+	constexpr REL::ID kOutpostData{ 73983 };
 
 	constexpr std::uint32_t kBeaconBase = 0x002C60E9;
 	constexpr std::uint8_t  kTypeREFR = 0x4A;
@@ -610,14 +613,26 @@ namespace Stats
 		return out;
 	}
 
+	// the outpost's own name (what the player named it in build mode); "" if it has none
+	std::string OutpostName(void* a_beacon)
+	{
+		using fn_t = void* (*)(void*, bool);
+		const auto* data = static_cast<const std::uint8_t*>(reinterpret_cast<fn_t>(kOutpostData.address())(a_beacon, false));
+		if (!data || !At<const void*>(data, 0x70)) return {};
+		const char* s = reinterpret_cast<const RE::BSFixedString*>(data + 0x70)->c_str();
+		return s ? s : "";
+	}
+
 	std::vector<Ui::InfoRow> Outposts()
 	{
 		static std::vector<std::uint32_t>            beacons;
 		static std::chrono::steady_clock::time_point scanned{};
 		const auto                                   now = std::chrono::steady_clock::now();
+		bool                                         logNames = false;
 		if (scanned == std::chrono::steady_clock::time_point{} || now - scanned > std::chrono::seconds(30)) {
 			beacons = ScanBeacons();
 			scanned = now;
+			logNames = true;
 			REX::INFO("stats: {} outpost beacons", beacons.size());
 		}
 		std::vector<Ui::InfoRow> rows;
@@ -627,13 +642,19 @@ namespace Stats
 		for (const auto id : beacons) {
 			auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(id);
 			if (!ref) continue;
+			// the outpost's name lives in its beacon data; the reference's own name is the beacon object's
+			const auto  outpost = OutpostName(ref);
 			const char* dn = ref->GetDisplayFullName();
-			std::string name = dn && *dn ? dn : RefName(ref);
+			const auto  refName = dn && *dn ? std::string(dn) : RefName(ref);
+			std::string name = !outpost.empty() ? outpost : refName;
 			++n;
 			if (name.empty()) name = Tr("前哨站 ") + std::to_string(n);
 			void*      planet = PlanetOf(ref);
 			const auto planetName = Name(planet);
 			const auto chain = LocationChain(ref);
+			if (logNames) {
+				REX::INFO("outpost {:08X}: name '{}' ref name '{}' location '{}'", id, outpost, refName, chain.empty() ? "" : chain[0]);
+			}
 			rows.push_back({ name, "", -1.0f, true });
 			rows.push_back({ Tr("星球"), planetName.empty() ? "—" : planetName });
 			if (!chain.empty() && !chain[0].empty() && chain[0] != planetName) rows.push_back({ Tr("地点"), chain[0] });
