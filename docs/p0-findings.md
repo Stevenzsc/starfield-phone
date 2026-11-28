@@ -35,7 +35,7 @@
 
 ## Screen texture writer (2026-11-27, verified in game)
 
-- Assets from `tools/make_test_assets.py` (copy `data/` into `Starfield\Data`): a 504x888 RGBA8 DDS, a material copied
+- Assets from `tools/make_test_assets.py` (copy `data/` into `Starfield\Data`): a 756x1332 RGBA8 DDS, a material copied
   from the vanilla `Dataslatescreen_01.mat` (loose JSON; its own `res:F237F6xx` object IDs renamed), and the vanilla
   slate NIF with its four material strings pointed at it. Loose `.mat` and NIF files load with `bInvalidateOlderFiles=1`.
 - The game creates the texture with `CreatePlacedResource`, format 27 (`R8G8B8A8_TYPELESS`), 1 mip, a few ms after the

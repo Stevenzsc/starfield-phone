@@ -1,6 +1,6 @@
 """Build the phone test assets into <repo>/data (copy that folder into Starfield\\Data).
 
-  Textures\\PhoneTest\\PhoneScreenTest.dds   504x888 R8G8B8A8_UNORM, 1 mip, magenta + grid.
+  Textures\\PhoneTest\\PhoneScreenTest.dds   756x1332 R8G8B8A8_UNORM, 1 mip, magenta + grid.
                                              The size is unique: the plugin finds the texture by it.
   Materials\\PhoneTest\\PhoneScreenTest.mat  copy of vanilla Dataslatescreen_01.mat using that texture (lit; unused).
   Materials\\PhoneTest\\PhoneScreenEmissive.mat
@@ -20,7 +20,7 @@ import re
 import struct
 import sys
 
-W, H = 504, 888
+W, H = 756, 1332
 DXGI_R8G8B8A8_UNORM = 28
 
 MAT_REL = "Materials\\PhoneTest\\PhoneScreenTest.mat"

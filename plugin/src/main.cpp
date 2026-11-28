@@ -92,8 +92,8 @@ namespace
 	constexpr int           kCycleKey = 0x7A;  // F11
 	constexpr std::uint32_t kSlateANIO = 0x0005AFB8;  // AnimObjectDataSlate
 	// Screen test texture (tools/make_test_assets.py): Textures\PhoneTest\PhoneScreenTest.dds
-	constexpr std::uint32_t kScreenWidth = 504;
-	constexpr std::uint32_t kScreenHeight = 888;
+	constexpr std::uint32_t kScreenWidth = 756;
+	constexpr std::uint32_t kScreenHeight = 1332;
 
 	// Model list for F11: Data\SFSE\Plugins\PhoneTest.ini, "model=<path under Meshes>" lines, re-read on every press
 	// (tools/make_test_assets.py writes it). Falls back to the vanilla slate.
