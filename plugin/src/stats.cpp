@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 
 namespace
@@ -258,10 +259,13 @@ namespace Stats
 		const auto loc = LocationName(p);
 		using ship_t = void* (*)(void*, bool);
 		void* aboard = reinterpret_cast<ship_t>(kGetSpaceship.address())(p, true);
+		const auto geo = CurrentGeo();
 		rows.push_back(Header("当前位置"));
+		rows.push_back({ "星系", geo.system.empty() ? "—" : geo.system });
 		rows.push_back({ "星球", planet.empty() ? "太空" : planet });
 		rows.push_back({ "地点", loc.empty() ? "—" : loc });
 		rows.push_back({ "状态", aboard ? "在飞船上" : (planet.empty() ? "太空中" : "地面") });
+		rows.push_back({ "GPS", geo.gps ? Gallery::GpsText(geo) : "无信号" });
 		rows.push_back(Header("家园飞船"));
 		{
 			HomeShip ship;
@@ -276,8 +280,345 @@ namespace Stats
 		static bool logged = false;
 		if (!logged) {
 			logged = true;
-			REX::INFO("stats: player planet '{}' location '{}' aboard {}", planet, loc, aboard);
+			REX::INFO("stats: player planet '{}' location '{}' system '{}' aboard {} gps {} {} {}", planet, loc, geo.system, aboard,
+				geo.gps, geo.lat, geo.lon);
 		}
 		return rows;
 	}
+}
+
+// ---- location / GPS, crew, scanner, outposts ----
+//   BGSPlanet::Manager            ID 945580 (static object): +0x80 planet form ID, +0x98 lon, +0xA0 lat (radians,
+//                                 landing-zone centre), +0x100 radius km; local positions are metres from that centre,
+//                                 +X east, +Y north (outpost-backup project, verified in game)
+//   BGSLocation                   +0xC0 parent location (Papyrus Location.GetParentLocations, FUN_141FE9F40)
+//   TESObjectREFR                 +0x88 heading (radians, 0 = north, clockwise), +0x8C position, +0xB0 parent cell,
+//                                 +0xC8 extra data list
+//   TESObjectCELL                 +0x48 bit 0 interior (Papyrus Cell.IsInterior, ID 118114; CommonLibSF says +0x40)
+//   ProcessLists                  ID 937584 (pointer): +0x60 u32 count, +0x68 u32* high-process actor handles
+//   handle -> reference           ID 35638 (ref** out, const u32* handle), reference released with ID 38742
+//   FindExtra                     ID 37878 (extra list, type); type 0xE2 on a ship = its crew: +0x18 u32 count,
+//                                 +0x20 u32* actor handles (ObjectReference.GetAllCrewMembers, FUN_14206F3B0)
+//   Actor.IsDead                  ID 116726 bool (vm, stack, actor)
+//   Actor.IsHostileToActor        ID 116842 bool (vm, stack, actor, target)
+//   Debug.ExecuteConsole          ID 117306 void (vm, stack, unused, BSFixedString*) -> runs a console line
+//   Debug.Notification            ID 117311 void (vm, stack, unused, BSFixedString*)
+//   Outpost beacons: references whose base is OutpostBeaconActivator (ACTI 002C60E9)
+
+namespace
+{
+	constexpr REL::ID kPlanetManager{ 945580 };
+	constexpr REL::ID kProcessLists{ 937584 };
+	constexpr REL::ID kLookupHandle{ 35638 };
+	constexpr REL::ID kFindExtra{ 37878 };
+	constexpr REL::ID kIsDead{ 116726 };
+	constexpr REL::ID kIsHostile{ 116842 };
+	constexpr REL::ID kExecuteConsole{ 117306 };
+	constexpr REL::ID kNotification{ 117311 };
+	constexpr REL::ID kAllForms{ 883341 };
+
+	constexpr std::uint32_t kBeaconBase = 0x002C60E9;
+	constexpr std::uint8_t  kTypeREFR = 0x4A;
+	constexpr std::uint8_t  kTypeACHR = 0x4B;
+
+	template <class T>
+	T At(const void* a_base, std::ptrdiff_t a_off)
+	{
+		return *reinterpret_cast<const T*>(reinterpret_cast<std::uintptr_t>(a_base) + a_off);
+	}
+
+	struct Pos
+	{
+		float x, y, z;
+	};
+	Pos PosOf(const void* a_ref) { return { At<float>(a_ref, 0x8C), At<float>(a_ref, 0x90), At<float>(a_ref, 0x94) }; }
+
+	std::uint32_t FormID(const void* a_form) { return a_form ? reinterpret_cast<const RE::TESForm*>(a_form)->GetFormID() : 0; }
+
+	bool Interior(const void* a_ref)
+	{
+		const void* cell = At<const void*>(a_ref, 0xB0);
+		return cell && (At<std::uint8_t>(cell, 0x48) & 1);
+	}
+
+	void* PlanetOf(void* a_ref)
+	{
+		using fn_t = void* (*)(void*, std::uint32_t, void*);
+		return a_ref ? reinterpret_cast<fn_t>(kGetCurrentPlanet.address())(nullptr, 0, a_ref) : nullptr;
+	}
+
+	// holds a reference resolved from a handle and releases it
+	struct RefPtr
+	{
+		void* ref = nullptr;
+		explicit RefPtr(std::uint32_t a_handle)
+		{
+			using fn_t = void** (*)(void**, const std::uint32_t*);
+			reinterpret_cast<fn_t>(kLookupHandle.address())(&ref, &a_handle);
+		}
+		~RefPtr()
+		{
+			if (ref) {
+				using fn_t = void (*)(void*);
+				reinterpret_cast<fn_t>(kReleaseRef.address())(ref);
+			}
+		}
+		RefPtr(const RefPtr&) = delete;
+		RefPtr& operator=(const RefPtr&) = delete;
+	};
+
+	// high-process (loaded, near) actor handles
+	std::vector<std::uint32_t> HighActors()
+	{
+		std::vector<std::uint32_t> out;
+		const auto* pl = *reinterpret_cast<const std::uint8_t* const*>(kProcessLists.address());
+		if (!pl) return out;
+		const auto  n = At<std::uint32_t>(pl, 0x60);
+		const auto* h = At<const std::uint32_t*>(pl, 0x68);
+		for (std::uint32_t i = 0; h && i < n && i < 4096; ++i) out.push_back(h[i]);
+		return out;
+	}
+
+	// crew handles of a ship (extra data 0xE2)
+	std::vector<std::uint32_t> CrewHandles(void* a_ship)
+	{
+		std::vector<std::uint32_t> out;
+		void* list = a_ship ? At<void*>(a_ship, 0xC8) : nullptr;
+		if (!list) return out;
+		using fn_t = void* (*)(void*, std::uint8_t);
+		void* extra = reinterpret_cast<fn_t>(kFindExtra.address())(list, 0xE2);
+		if (!extra) return out;
+		const auto  n = At<std::uint32_t>(extra, 0x18);
+		const auto* h = At<const std::uint32_t*>(extra, 0x20);
+		for (std::uint32_t i = 0; h && i < n && i < 256; ++i) out.push_back(h[i]);
+		return out;
+	}
+
+	bool IsDead(void* a_actor)
+	{
+		using fn_t = bool (*)(void*, std::uint32_t, void*);
+		return reinterpret_cast<fn_t>(kIsDead.address())(nullptr, 0, a_actor);
+	}
+
+	bool IsHostile(void* a_actor, void* a_target)
+	{
+		using fn_t = bool (*)(void*, std::uint32_t, void*, void*);
+		return reinterpret_cast<fn_t>(kIsHostile.address())(nullptr, 0, a_actor, a_target);
+	}
+
+	void RunNative(const REL::ID& a_id, const std::string& a_text)
+	{
+		RE::BSFixedString text{ a_text.c_str() };
+		using fn_t = void (*)(void*, std::uint32_t, void*, const RE::BSFixedString*);
+		reinterpret_cast<fn_t>(a_id.address())(nullptr, 0, nullptr, &text);
+	}
+
+	float Distance(const Pos& a, const Pos& b)
+	{
+		const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	}
+
+	std::string Meters(float a_m)
+	{
+		char buf[32];
+		if (a_m >= 1000.0f) std::snprintf(buf, sizeof(buf), "%.1f km", a_m / 1000.0f);
+		else std::snprintf(buf, sizeof(buf), "%.0f m", a_m);
+		return buf;
+	}
+
+	// location names from the ref's location up to the root
+	std::vector<std::string> LocationChain(void* a_ref)
+	{
+		std::vector<std::string> out;
+		using fn_t = void* (*)(void*);
+		void* loc = a_ref ? reinterpret_cast<fn_t>(kGetCurrentLocation.address())(a_ref) : nullptr;
+		for (int i = 0; loc && i < 12; ++i, loc = At<void*>(loc, 0xC0)) {
+			out.push_back(Name(loc));
+		}
+		return out;
+	}
+
+	// outpost beacon references (form IDs), from the all-forms map
+	std::vector<std::uint32_t> ScanBeacons()
+	{
+		std::vector<std::uint32_t> out;
+		auto*                      base = RE::TESForm::LookupByID(kBeaconBase);
+		auto*                      map = *reinterpret_cast<std::uint8_t**>(kAllForms.address());
+		if (!base || !map) return out;
+		auto* lock = reinterpret_cast<RE::BSReadWriteLock*>(map + 0x30);
+		lock->LockRead();
+		const auto* entries = *reinterpret_cast<const std::uint8_t* const*>(map + 0x10);
+		const auto  capacity = *reinterpret_cast<const std::uint64_t*>(map + 0x18);
+		for (std::uint64_t i = 0; entries && i < capacity && i < (1ull << 26); ++i) {
+			const auto* e = entries + i * 0x18;
+			const auto* form = *reinterpret_cast<const RE::TESForm* const*>(e + 8);
+			if (!form || *reinterpret_cast<const std::uint32_t*>(e) != form->GetFormID()) continue;
+			if (At<std::uint8_t>(form, 0x2E) == kTypeREFR && At<const void*>(form, 0x98) == base) {
+				out.push_back(form->GetFormID());
+			}
+		}
+		lock->UnlockRead();
+		return out;
+	}
+}
+
+namespace Stats
+{
+	Gallery::Geo CurrentGeo()
+	{
+		Gallery::Geo g;
+		auto*        p = Player();
+		if (!p || !At<void*>(p, 0xB0)) return g;  // no parent cell: no save loaded yet
+		void* planet = PlanetOf(p);
+		g.planet = Name(planet);
+		const auto chain = LocationChain(p);
+		if (!chain.empty() && chain[0] != g.planet) g.place = chain[0];
+		for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
+			if (!g.planet.empty() && chain[i] == g.planet) {  // the star system is the planet location's parent
+				g.system = chain[i + 1];
+				break;
+			}
+		}
+		const auto* pm = reinterpret_cast<const std::uint8_t*>(kPlanetManager.address());
+		const float radiusKm = At<float>(pm, 0x100);
+		if (planet && At<std::uint32_t>(pm, 0x80) == FormID(planet) && radiusKm > 1.0f && !Interior(p)) {
+			constexpr double toDeg = 180.0 / 3.14159265358979323846;
+			const double     lon0 = At<double>(pm, 0x98) * toDeg, lat0 = At<double>(pm, 0xA0) * toDeg;
+			const double     R = double(radiusKm) * 1000.0;
+			const auto       pos = PosOf(p);
+			g.lat = std::clamp(lat0 + pos.y / R * toDeg, -90.0, 90.0);
+			g.lon = lon0 + pos.x / (R * std::max(0.01, std::cos(lat0 / toDeg))) * toDeg;
+			while (g.lon > 180) g.lon -= 360;
+			while (g.lon < -180) g.lon += 360;
+			g.gps = std::isfinite(g.lat) && std::isfinite(g.lon);
+		}
+		if (auto* cal = RE::Calendar::GetSingleton()) {
+			const float    h = cal->GetHour();
+			const unsigned y = cal->GetYear() < 1000 ? cal->GetYear() + 2000 : cal->GetYear();
+			char           buf[64];
+			std::snprintf(buf, sizeof(buf), "%u年%u月%u日 %02d:%02d", y, unsigned(cal->GetMonth() + 1), unsigned(cal->GetDay()),
+				int(h) % 24, int((h - std::floor(h)) * 60.0f) % 60);
+			g.date = buf;
+		}
+		return g;
+	}
+
+	std::vector<Ui::Contact> Contacts()
+	{
+		std::vector<Ui::Contact> out;
+		auto*                    p = Player();
+		HomeShip                 ship;
+		if (!p || !ship.ref) return out;
+		const auto me = PosOf(p);
+		const auto high = HighActors();
+		void*      myPlanet = PlanetOf(p);
+		for (const auto h : CrewHandles(ship.ref)) {
+			RefPtr a(h);
+			if (!a.ref || a.ref == p) continue;
+			Ui::Contact c;
+			c.formID = FormID(a.ref);
+			c.name = RefName(a.ref);
+			if (c.name.empty()) c.name = "船员";
+			c.dead = IsDead(a.ref);
+			const bool loaded = std::find(high.begin(), high.end(), h) != high.end();
+			if (loaded && PlanetOf(a.ref) == myPlanet) {
+				c.distance = Distance(PosOf(a.ref), me);
+				c.where = "附近 " + Meters(c.distance);
+			} else {
+				c.where = Place(a.ref);
+			}
+			out.push_back(std::move(c));
+		}
+		std::stable_sort(out.begin(), out.end(), [](const Ui::Contact& a, const Ui::Contact& b) {
+			if ((a.distance >= 0) != (b.distance >= 0)) return a.distance >= 0;
+			return a.name < b.name;
+		});
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			REX::INFO("stats: {} crew on the home ship", out.size());
+			for (const auto& c : out) REX::INFO("stats:   {:08X} '{}' {} dead {}", c.formID, c.name, c.where, c.dead);
+		}
+		return out;
+	}
+
+	bool Summon(std::uint32_t a_formID)
+	{
+		if (!a_formID) return false;
+		char cmd[48];
+		std::snprintf(cmd, sizeof(cmd), "%08X.moveto player", a_formID);
+		REX::INFO("contacts: console '{}'", cmd);
+		RunNative(kExecuteConsole, cmd);
+		return true;
+	}
+
+	std::vector<Ui::Blip> Radar(float a_range)
+	{
+		std::vector<Ui::Blip> out;
+		auto*                 p = Player();
+		if (!p) return out;
+		const auto  me = PosOf(p);
+		const float heading = At<float>(p, 0x88);
+		const float s = std::sin(heading), c = std::cos(heading);
+		HomeShip    ship;
+		const auto  crew = CrewHandles(ship.ref);
+		for (const auto h : HighActors()) {
+			RefPtr a(h);
+			if (!a.ref || a.ref == p || At<std::uint8_t>(a.ref, 0x2E) != kTypeACHR) continue;
+			const auto  pos = PosOf(a.ref);
+			const float dx = pos.x - me.x, dy = pos.y - me.y;
+			const float d = Distance(pos, me);
+			if (!(d <= a_range)) continue;
+			Ui::Blip b;
+			b.name = RefName(a.ref);
+			if (b.name.empty()) b.name = "未知";
+			b.right = dx * c - dy * s;
+			b.forward = dx * s + dy * c;
+			b.distance = d;
+			if (IsDead(a.ref)) b.kind = 3;
+			else if (std::find(crew.begin(), crew.end(), h) != crew.end()) b.kind = 2;
+			else if (IsHostile(a.ref, p)) b.kind = 1;
+			out.push_back(std::move(b));
+		}
+		std::sort(out.begin(), out.end(), [](const Ui::Blip& a, const Ui::Blip& b) { return a.distance < b.distance; });
+		if (out.size() > 60) out.resize(60);
+		return out;
+	}
+
+	std::vector<Ui::InfoRow> Outposts()
+	{
+		static std::vector<std::uint32_t>            beacons;
+		static std::chrono::steady_clock::time_point scanned{};
+		const auto                                   now = std::chrono::steady_clock::now();
+		if (scanned == std::chrono::steady_clock::time_point{} || now - scanned > std::chrono::seconds(30)) {
+			beacons = ScanBeacons();
+			scanned = now;
+			REX::INFO("stats: {} outpost beacons", beacons.size());
+		}
+		std::vector<Ui::InfoRow> rows;
+		auto*                    p = Player();
+		void*                    myPlanet = p ? PlanetOf(p) : nullptr;
+		int                      n = 0;
+		for (const auto id : beacons) {
+			auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(id);
+			if (!ref) continue;
+			const char* dn = ref->GetDisplayFullName();
+			std::string name = dn && *dn ? dn : RefName(ref);
+			++n;
+			if (name.empty()) name = "前哨站 " + std::to_string(n);
+			void*      planet = PlanetOf(ref);
+			const auto planetName = Name(planet);
+			const auto chain = LocationChain(ref);
+			rows.push_back({ name, "", -1.0f, true });
+			rows.push_back({ "星球", planetName.empty() ? "—" : planetName });
+			if (!chain.empty() && !chain[0].empty() && chain[0] != planetName) rows.push_back({ "地点", chain[0] });
+			if (p && planet && planet == myPlanet && !Interior(p)) {
+				rows.push_back({ "距离", Meters(Distance(PosOf(ref), PosOf(p))) });
+			}
+		}
+		return rows;
+	}
+
+	void HudNotify(const std::string& a_utf8) { RunNative(kNotification, a_utf8); }
 }

@@ -294,7 +294,16 @@ namespace
 				}
 			}
 			Log("camera: photo %ux%u %s %s", a_w, a_h, name, ok ? "saved" : "FAILED");
-			Ui::SetCameraStatus(ok ? std::string("已保存 ") + name : std::string("保存失败"));
+			std::string where;
+			if (ok) {
+				std::wstring path = dir + L"\\";
+				for (const char* p = name; *p; ++p) {
+					path += wchar_t(*p);
+				}
+				Gallery::TagCurrent(path);  // location ("GPS") of the moment
+				where = Gallery::PlaceTitle(Gallery::CurrentGeo());
+			}
+			Ui::SetCameraStatus(ok ? (where.empty() ? std::string("已保存") : "已保存 · " + where) : std::string("保存失败"));
 			g_photoSaving = false;
 		}).detach();
 	}

@@ -379,6 +379,7 @@ namespace
 		{ "相册", "册", 0xE8B9 },    // Picture
 		{ "联系人", "人", 0xE716 },  // People
 		{ "前哨站", "哨", 0xE80F },  // Home
+		{ "扫描仪", "扫", 0xE721 },  // Search
 		{ "设置", "设", 0xE713 },    // Settings
 	};
 	enum AppId
@@ -393,6 +394,7 @@ namespace
 		kAppGallery,
 		kAppContacts,
 		kAppOutposts,
+		kAppScanner,
 		kAppSettings,
 	};
 
@@ -415,8 +417,13 @@ namespace
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
 		int detailScroll = 0; // first objective row on the quest details page
 		// gallery
-		int  galIndex = 0;         // shown photo (0 = newest)
+		int  galIndex = 0;         // shown photo in the open album (0 = newest)
 		bool galConfirm = false;   // Enter pressed once: the next Enter deletes
+		int  albumSel = 0;         // selected album on the album list
+		int  galFilter = 0;        // 0 all, 1 phone, 2 photo mode
+		// contacts / scanner
+		int  contactSel = 0;
+		int  radarRange = 1;       // index into kRadarRanges
 		// info pages / messages
 		int  infoScroll = 0;       // first row shown
 		int  msgScroll = 0;        // first message shown
@@ -437,7 +444,13 @@ namespace
 		kInfoPage,
 		kCalendarPage,
 		kMessagesPage,
+		kPhotoPage,      // one album's photos (kGalleryPage is the album list)
+		kContactsPage,
+		kCallPage,
+		kRadarPage,
 	};
+
+	constexpr float kRadarRanges[] = { 25.0f, 50.0f, 100.0f, 200.0f };
 
 	// app index -> page (order of kApps)
 	int PageFor(int a_app)
@@ -447,7 +460,10 @@ namespace
 		case kAppQuests: return kQuestsPage;
 		case kAppCharacter:
 		case kAppShip:
-		case kAppMap: return kInfoPage;
+		case kAppMap:
+		case kAppOutposts: return kInfoPage;
+		case kAppContacts: return kContactsPage;
+		case kAppScanner: return kRadarPage;
 		case kAppCalendar: return kCalendarPage;
 		case kAppCamera: return kCameraPage;
 		case kAppGallery: return kGalleryPage;
@@ -462,6 +478,7 @@ namespace
 		case kAppCharacter: return Ui::Info::kCharacter;
 		case kAppShip: return Ui::Info::kShip;
 		case kAppMap: return Ui::Info::kMap;
+		case kAppOutposts: return Ui::Info::kOutposts;
 		default: return Ui::Info::kNone;
 		}
 	}
@@ -512,8 +529,24 @@ namespace
 	std::atomic_bool          g_camOpen{ false };
 	std::atomic_int           g_camW{ 0 }, g_camH{ 0 };
 
-	// gallery: file list (g_lock); the decoded photo comes from a worker thread (g_camLock, bumps g_camSeq)
-	std::vector<std::wstring> g_galFiles;
+	// contacts / scanner (g_lock)
+	std::vector<Ui::Contact> g_contacts;
+	bool                     g_contactsLoaded = false;
+	Ui::Contact              g_callee;       // the contact on the call screen
+	std::string              g_callResult;  // "已呼叫，正在赶来" etc.
+	std::vector<Ui::Blip>    g_blips;
+	bool                     g_radarLoaded = false;
+
+	// gallery: photo list and albums (g_lock); the decoded photo comes from a worker thread (g_camLock, bumps g_camSeq)
+	struct Album
+	{
+		std::string      title;  // place, "全部照片" or "未知位置"
+		std::string      sub;    // star system / count line
+		std::vector<int> photos;  // indexes into g_photos, newest first
+	};
+	std::vector<Gallery::Photo> g_photos;
+	std::vector<Album>          g_albums;
+	std::vector<std::wstring>   g_galFiles;  // display paths of the open album (viewer)
 	std::wstring              g_galImgPath;  // photo in g_galImg (or being loaded)
 	std::vector<std::uint8_t> g_galImg;      // RGBA8; empty = could not be opened
 	int                       g_galImgW = 0, g_galImgH = 0, g_galImgMaxW = 0, g_galImgMaxH = 0;
@@ -753,24 +786,128 @@ namespace
 		RoundRect(c, c.w / 2 - in / 2, sy + (d - in) / 2, in, in, in / 2, kText, kText);
 	}
 
-	// one photo at a time, newest first; decoded on a worker thread
-	void DrawGallery(Canvas& c, const State& s, int a_y)
+	std::string Fit(const std::string& a_text, float a_px, int a_maxW);
+
+	const char* kGalFilters[] = { "全部", "手机", "拍照模式" };
+
+	// (g_lock held) group g_photos into albums by place: "全部照片", then places (newest first), then "未知位置"
+	void BuildAlbums(int a_filter)
+	{
+		g_albums.clear();
+		Album              all{ "全部照片", "", {} };
+		Album              unknown{ "未知位置", "没有位置记录的照片", {} };
+		std::vector<Album> places;
+		for (int i = 0; i < int(g_photos.size()); ++i) {
+			const auto& p = g_photos[i];
+			if ((a_filter == 1 && p.source != Gallery::Source::kPhone) || (a_filter == 2 && p.source != Gallery::Source::kPhotoMode)) {
+				continue;
+			}
+			all.photos.push_back(i);
+			const auto title = p.tagged ? Gallery::PlaceTitle(p.geo) : std::string{};
+			if (title.empty()) {
+				unknown.photos.push_back(i);
+				continue;
+			}
+			auto it = std::find_if(places.begin(), places.end(), [&](const Album& a) { return a.title == title; });
+			if (it == places.end()) {
+				places.push_back({ title, p.geo.system, {} });
+				it = places.end() - 1;
+			}
+			it->photos.push_back(i);
+		}
+		if (all.photos.empty()) {
+			return;
+		}
+		g_albums.push_back(std::move(all));
+		for (auto& a : places) g_albums.push_back(std::move(a));
+		if (!unknown.photos.empty()) g_albums.push_back(std::move(unknown));
+	}
+
+	// (g_lock held) the viewer's list = display paths of the selected album
+	void OpenAlbum(const State& s)
+	{
+		g_galFiles.clear();
+		if (g_albums.empty()) return;
+		for (const int i : g_albums[std::clamp(s.albumSel, 0, int(g_albums.size()) - 1)].photos) {
+			g_galFiles.push_back(g_photos[i].display);
+		}
+	}
+
+	void ReloadPhotos(int a_filter)
+	{
+		g_photos = Gallery::List();
+		BuildAlbums(a_filter);
+	}
+
+	// album list: place, star system, photo count
+	void DrawAlbums(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h), W = float(c.w);
-		const float f = std::max(12.0f, H * 0.036f);
+		const int   pad = Pad(c);
+		const int   n = int(g_albums.size());
+		const int   bottom = Prompts(c, { { "↑↓", "选择" }, { "←→", kGalFilters[s.galFilter] }, { "Enter", "打开" }, { "退格", "返回" } });
+		char        note[32];
+		std::snprintf(note, sizeof(note), "%d 张", n ? int(g_albums[0].photos.size()) : 0);
+		int         y = Header(c, a_y, "相册", note);
+		const float f = std::max(13.0f, H * 0.042f), sf = f * 0.78f;
+		if (!n) {
+			TextCentered(c, c.w / 2, y + int(H * 0.12f), "还没有照片", std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), "手机相机或拍照模式拍的照片会出现在这里", sf, kDim);
+			return;
+		}
+		const int limit = bottom - int(H * 0.01f);
+		const int inner = int(W * 0.03f);
+		const int rowH = int(f * 1.35f + sf * 1.35f + H * 0.02f);
+		const int sel = std::clamp(s.albumSel, 0, n - 1);
+		// keep the selection visible
+		const int visible = std::max(1, (limit - y) / rowH);
+		const int first = std::clamp(sel - visible + 1, 0, std::max(0, n - visible));
+		for (int i = first; i < n && y + rowH <= limit + 2; ++i) {
+			const auto& a = g_albums[i];
+			const bool  on = i == sel;
+			if (on) {
+				Rect(c, pad, y, c.w - 2 * pad, rowH - 4, kSelBg);
+			} else {
+				Rect(c, pad, y + rowH - 3, c.w - 2 * pad, 1, kLine, 0.7f);
+			}
+			const Rgb fg = on ? kSelText : kText, dim = on ? Rgb{ 70, 76, 84 } : kDim;
+			// pin mark for place albums
+			const bool place = i > 0 && a.title != "未知位置";
+			int        tx = pad + inner;
+			if (place) {
+				Rect(c, tx, y + int(f * 0.3f), int(f * 0.28f), int(f * 0.75f), on ? kSelText : kStripe[1]);
+				tx += int(f * 0.6f);
+			}
+			char count[16];
+			std::snprintf(count, sizeof(count), "%d", int(a.photos.size()));
+			const int cw = TextWidth(count, f);
+			Text(c, tx, y + int(H * 0.008f), Fit(a.title, f, c.w - pad - inner - tx - cw - inner).c_str(), f, fg);
+			Text(c, c.w - pad - inner - cw, y + int(H * 0.008f), count, f, dim);
+			const std::string sub = i == 0 ? std::string(kGalFilters[s.galFilter]) + "照片" : (a.sub.empty() ? "—" : a.sub);
+			Text(c, tx, y + int(H * 0.008f) + int(f * 1.35f), Fit(sub, sf, c.w - pad - inner - tx).c_str(), sf, dim);
+			y += rowH;
+		}
+	}
+
+	// one photo of the open album; decoded on a worker thread
+	void DrawPhoto(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const float f = std::max(12.0f, H * 0.034f);
 		const int   n = int(g_galFiles.size());
 		const bool  confirm = s.galConfirm;
 		const int   bottom = n ? Prompts(c, { { "←→", "翻看" }, { "Enter", confirm ? "确认删除" : "删除" }, { "退格", "返回" } }) :
 		                         Prompts(c, { { "退格", "返回" } });
-		if (!n) {
+		if (!n || g_albums.empty()) {
 			const int y = Header(c, a_y, "相册");
-			TextCentered(c, c.w / 2, y + int(H * 0.15f), "还没有照片", std::max(16.0f, H * 0.05f), kText);
-			TextCentered(c, c.w / 2, y + int(H * 0.15f) + int(H * 0.08f), "在相机里按 Enter 拍照", f, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.15f), "这个相册是空的", std::max(16.0f, H * 0.05f), kText);
 			return;
 		}
+		const auto& album = g_albums[std::clamp(s.albumSel, 0, int(g_albums.size()) - 1)];
 		const int   idx = std::clamp(s.galIndex, 0, n - 1);
 		const auto& path = g_galFiles[idx];
-		const int   infoH = int(f * 2.2f);
+		const auto& photo = g_photos[album.photos[std::clamp(idx, 0, int(album.photos.size()) - 1)]];
+		const int   infoH = int(f * 4.4f);
 		const int   vx = int(W * 0.03f), vy = a_y + int(H * 0.02f);
 		const int   vw = c.w - 2 * vx, vh = bottom - vy - infoH - int(H * 0.015f);
 		Rect(c, vx, vy, vw, vh, { 0, 0, 0 }, 0.85f);
@@ -815,19 +952,33 @@ namespace
 			}
 		}
 		Brackets(c, vx, vy, vw, vh, int(std::min(vw, vh) * 0.08f), 3, kText);
-		// info row: counter left, capture time right; delete confirmation replaces the time
-		const int ty = vy + vh + (infoH - int(f * 1.3f)) / 2 + int(H * 0.01f);
+		// source badge on the photo
+		const char* src = photo.source == Gallery::Source::kPhone ? "手机" : "拍照模式";
+		const int   bw = TextWidth(src, f * 0.8f) + int(f * 0.8f);
+		Rect(c, vx + int(f * 0.5f), vy + int(f * 0.5f), bw, int(f * 1.3f), kBgTop, 0.8f);
+		Text(c, vx + int(f * 0.9f), vy + int(f * 0.62f), src, f * 0.8f, kText);
+		// info: counter + time, then place (the album key) and GPS
+		const int pad = vx;
+		int       ty = vy + vh + int(H * 0.012f);
 		char      count[32];
 		std::snprintf(count, sizeof(count), "%02d / %02d", idx + 1, n);
-		const int pad = vx;
 		Text(c, pad, ty, count, f, kText);
 		if (confirm) {
 			const char* warn = "再按 Enter 删除（移到回收站）";
 			Text(c, c.w - pad - TextWidth(warn, f), ty, warn, f, kWarn);
 		} else {
-			const auto cap = Gallery::Caption(path);
+			const auto& cap = photo.tagged && !photo.geo.date.empty() ? photo.geo.date : photo.caption;
 			Text(c, c.w - pad - TextWidth(cap.c_str(), f), ty, cap.c_str(), f, kDim);
 		}
+		ty += int(f * 1.45f);
+		const auto place = photo.tagged ? Gallery::PlaceTitle(photo.geo) : std::string{};
+		std::string where = place.empty() ? "位置未知" : place;
+		if (photo.tagged && !photo.geo.system.empty()) where += "，" + photo.geo.system;
+		Rect(c, pad, ty + int(f * 0.25f), int(f * 0.28f), int(f * 0.8f), place.empty() ? kDim : kStripe[1]);
+		Text(c, pad + int(f * 0.6f), ty, Fit(where, f, c.w - 2 * pad - int(f * 0.6f)).c_str(), f, place.empty() ? kDim : kText);
+		ty += int(f * 1.4f);
+		const auto gps = photo.tagged ? Gallery::GpsText(photo.geo) : std::string{};
+		Text(c, pad + int(f * 0.6f), ty, gps.empty() ? "GPS 无信号" : ("GPS  " + gps).c_str(), f * 0.85f, kDim);
 	}
 
 	void DrawQuests(Canvas& c, const State& s, int a_y)
@@ -973,7 +1124,7 @@ namespace
 			return;
 		}
 		if (g_infoRows.empty()) {
-			TextCentered(c, c.w / 2, y + int(H * 0.1f), s.openedApp == kAppShip ? "没有家园飞船" : "暂无数据", f, kDim);
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), s.openedApp == kAppShip ? "没有家园飞船" : s.openedApp == kAppOutposts ? "没有找到前哨站" : "暂无数据", f, kDim);
 			return;
 		}
 		const int limit = bottom - int(H * 0.01f);
@@ -1148,6 +1299,167 @@ namespace
 		Text(c, pad + inner, y + int(f * 1.45f), Fit(g_bannerText, f, c.w - 2 * pad - 2 * inner).c_str(), f, kText);
 	}
 
+	// filled anti-aliased disc / ring
+	void Disc(Canvas& c, float a_cx, float a_cy, float a_r, Rgb a_col, float a_alpha = 1.0f)
+	{
+		for (int y = int(a_cy - a_r - 1); y <= int(a_cy + a_r + 1); ++y)
+			for (int x = int(a_cx - a_r - 1); x <= int(a_cx + a_r + 1); ++x) {
+				const float d = std::hypot(x + 0.5f - a_cx, y + 0.5f - a_cy) - a_r;
+				c.Blend(x, y, a_col, std::clamp(0.5f - d, 0.0f, 1.0f) * a_alpha);
+			}
+	}
+
+	void Ring(Canvas& c, float a_cx, float a_cy, float a_r, float a_t, Rgb a_col, float a_alpha = 1.0f)
+	{
+		for (int y = int(a_cy - a_r - a_t); y <= int(a_cy + a_r + a_t); ++y)
+			for (int x = int(a_cx - a_r - a_t); x <= int(a_cx + a_r + a_t); ++x) {
+				const float d = std::fabs(std::hypot(x + 0.5f - a_cx, y + 0.5f - a_cy) - a_r) - a_t / 2;
+				c.Blend(x, y, a_col, std::clamp(0.5f - d, 0.0f, 1.0f) * a_alpha);
+			}
+	}
+
+	std::string FirstChar(const std::string& a_utf8)
+	{
+		if (a_utf8.empty()) return "?";
+		const auto b = static_cast<unsigned char>(a_utf8[0]);
+		const int  len = b < 0x80 ? 1 : (b >> 5) == 0x6 ? 2 : (b >> 4) == 0xE ? 3 : 4;
+		return a_utf8.substr(0, std::min<std::size_t>(len, a_utf8.size()));
+	}
+
+	void DrawContacts(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const int   n = int(g_contacts.size());
+		const int   bottom = n ? Prompts(c, { { "↑↓", "选择" }, { "Enter", "呼叫" }, { "退格", "返回" } }) : Prompts(c, { { "退格", "返回" } });
+		char        note[16] = "";
+		if (n) std::snprintf(note, sizeof(note), "%d 人", n);
+		int         y = Header(c, a_y, "联系人", n ? note : nullptr);
+		const float f = std::max(13.0f, H * 0.042f), sf = f * 0.78f;
+		if (!g_contactsLoaded) {
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", f, kDim);
+			return;
+		}
+		if (!n) {
+			TextCentered(c, c.w / 2, y + int(H * 0.12f), "没有船员", std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), "分配到家园飞船的船员会出现在这里", sf, kDim);
+			return;
+		}
+		const int limit = bottom - int(H * 0.01f);
+		const int inner = int(W * 0.03f);
+		const int rowH = int(f * 1.35f + sf * 1.35f + H * 0.02f);
+		const int av = int(rowH * 0.7f);  // avatar size
+		const int sel = std::clamp(s.contactSel, 0, n - 1);
+		const int visible = std::max(1, (limit - y) / rowH);
+		const int first = std::clamp(sel - visible + 1, 0, std::max(0, n - visible));
+		for (int i = first; i < n && y + rowH <= limit + 2; ++i) {
+			const auto& ct = g_contacts[i];
+			const bool  on = i == sel;
+			if (on) Rect(c, pad, y, c.w - 2 * pad, rowH - 4, kSelBg);
+			else Rect(c, pad, y + rowH - 3, c.w - 2 * pad, 1, kLine, 0.7f);
+			const Rgb fg = on ? kSelText : kText, dim = on ? Rgb{ 70, 76, 84 } : kDim;
+			const int ax = pad + inner, ay = y + (rowH - 4 - av) / 2;
+			Disc(c, ax + av / 2.0f, ay + av / 2.0f, av / 2.0f, ct.dead ? kDim : (ct.distance >= 0 ? kStripe[3] : kPanel));
+			const auto ini = FirstChar(ct.name);
+			TextCentered(c, ax + av / 2, ay + int(av * 0.18f), ini.c_str(), av * 0.55f, kText);
+			const int tx = ax + av + inner;
+			Text(c, tx, y + int(H * 0.008f), Fit(ct.name, f, c.w - pad - inner - tx).c_str(), f, fg);
+			const std::string where = ct.dead ? "已阵亡" : ct.where;
+			Text(c, tx, y + int(H * 0.008f) + int(f * 1.35f), Fit(where, sf, c.w - pad - inner - tx).c_str(), sf,
+				ct.distance >= 0 && !on ? kStripe[3] : dim);
+			y += rowH;
+		}
+	}
+
+	void DrawCall(Canvas& c, const State&, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const auto& ct = g_callee;
+		Prompts(c, { { "Enter", ct.dead ? "—" : "叫过来" }, { "退格", "挂断" } });
+		const float big = std::max(18.0f, H * 0.065f), f = std::max(13.0f, H * 0.04f);
+		const int   av = int(std::min(W * 0.4f, H * 0.2f));
+		const int   cy = a_y + int(H * 0.1f) + av / 2;
+		Ring(c, c.w / 2.0f, float(cy), av / 2.0f + av * 0.12f, 3, kStripe[1], 0.8f);
+		Disc(c, c.w / 2.0f, float(cy), av / 2.0f, ct.dead ? kDim : kStripe[3]);
+		const auto ini = FirstChar(ct.name);
+		TextCentered(c, c.w / 2, cy - int(av * 0.3f), ini.c_str(), av * 0.55f, kText);
+		int y = cy + av / 2 + int(av * 0.25f);
+		TextCentered(c, c.w / 2, y, Fit(ct.name, big, c.w - 2 * Pad(c)).c_str(), big, kText);
+		y += int(big * 1.5f);
+		TextCentered(c, c.w / 2, y, Fit(ct.dead ? "已阵亡" : ct.where, f, c.w - 2 * Pad(c)).c_str(), f, kDim);
+		y += int(f * 2.2f);
+		const std::string status = ct.dead ? "无法接通" : (g_callResult.empty() ? "通话中…" : g_callResult);
+		TextCentered(c, c.w / 2, y, status.c_str(), f, ct.dead ? kWarn : kGold);
+	}
+
+	const char* Direction(float a_right, float a_forward)
+	{
+		constexpr const char* dirs[] = { "前方", "右前", "右侧", "右后", "后方", "左后", "左侧", "左前" };
+		float deg = std::atan2(a_right, a_forward) * 57.2957795f;  // 0 = ahead, clockwise
+		if (deg < 0) deg += 360.0f;
+		return dirs[int((deg + 22.5f) / 45.0f) % 8];
+	}
+
+	void DrawRadar(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const float range = kRadarRanges[std::clamp(s.radarRange, 0, int(std::size(kRadarRanges)) - 1)];
+		char        rangeLabel[32];
+		std::snprintf(rangeLabel, sizeof(rangeLabel), "范围 %.0f m", range);
+		const int bottom = Prompts(c, { { "←→", rangeLabel }, { "退格", "返回" } });
+		int       hostile = 0;
+		for (const auto& b : g_blips) hostile += b.kind == 1;
+		char note[32] = "";
+		if (hostile) std::snprintf(note, sizeof(note), "敌对 %d", hostile);
+		int         y = Header(c, a_y, "扫描仪", hostile ? note : nullptr);
+		const float f = std::max(12.0f, H * 0.036f);
+		// radar disc
+		const float R = std::min((c.w - 2 * pad) * 0.48f, (bottom - y) * 0.3f);
+		const float cx = c.w / 2.0f, cy = y + R + H * 0.01f;
+		Disc(c, cx, cy, R, kPanel, 0.85f);
+		for (int k = 1; k <= 3; ++k) Ring(c, cx, cy, R * k / 3.0f, 1.2f, kLine);
+		Rect(c, int(cx - R), int(cy), int(2 * R), 1, kLine, 0.7f);
+		Rect(c, int(cx), int(cy - R), 1, int(2 * R), kLine, 0.7f);
+		auto colorOf = [](int a_kind) { return a_kind == 1 ? kWarn : a_kind == 2 ? kStripe[3] : a_kind == 3 ? kDim : kText; };
+		for (auto it = g_blips.rbegin(); it != g_blips.rend(); ++it) {  // nearest drawn last (on top)
+			const float bx = cx + std::clamp(it->right / range, -1.0f, 1.0f) * R;
+			const float by = cy - std::clamp(it->forward / range, -1.0f, 1.0f) * R;
+			Disc(c, bx, by, std::max(3.0f, R * 0.035f), colorOf(it->kind));
+		}
+		// the player: a small arrow pointing up (forward)
+		const float a = std::max(5.0f, R * 0.06f);
+		for (int yy = 0; yy < int(a * 1.6f); ++yy) {
+			const float half = a * 0.6f * yy / (a * 1.6f);
+			Rect(c, int(cx - half), int(cy - a + yy), std::max(1, int(2 * half)), 1, kGold);
+		}
+		char rl[16];
+		std::snprintf(rl, sizeof(rl), "%.0f m", range);
+		Text(c, int(cx + R * 0.72f), int(cy - R), rl, f * 0.75f, kDim);
+		y = int(cy + R + H * 0.02f);
+		if (!g_radarLoaded) {
+			TextCentered(c, c.w / 2, y, "扫描中…", f, kDim);
+			return;
+		}
+		if (g_blips.empty()) {
+			TextCentered(c, c.w / 2, y, "附近没有发现生命体", f, kDim);
+			return;
+		}
+		// nearest contacts
+		const int limit = bottom - int(H * 0.01f);
+		const int rowH = int(f * 1.55f);
+		for (const auto& b : g_blips) {
+			if (y + rowH > limit) break;
+			Disc(c, pad + f * 0.4f, y + f * 0.65f, f * 0.3f, colorOf(b.kind));
+			char dist[48];
+			std::snprintf(dist, sizeof(dist), "%s %.0f m", Direction(b.right, b.forward), b.distance);
+			const int dw = TextWidth(dist, f);
+			Text(c, pad + int(f * 1.2f), y, Fit(b.name, f, c.w - 2 * pad - int(f * 1.6f) - dw).c_str(), f, b.kind == 3 ? kDim : kText);
+			Text(c, c.w - pad - dw, y, dist, f, b.kind == 1 ? kWarn : kDim);
+			y += rowH;
+		}
+	}
+
 	void DrawPlaceholder(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h);
@@ -1163,7 +1475,11 @@ namespace
 		case kHome: DrawHome(c, s, y); break;
 		case kSettingsPage: DrawSettings(c, s, y); break;
 		case kCameraPage: DrawCamera(c, s, y); break;
-		case kGalleryPage: DrawGallery(c, s, y); break;
+		case kGalleryPage: DrawAlbums(c, s, y); break;
+		case kPhotoPage: DrawPhoto(c, s, y); break;
+		case kContactsPage: DrawContacts(c, s, y); break;
+		case kCallPage: DrawCall(c, s, y); break;
+		case kRadarPage: DrawRadar(c, s, y); break;
 		case kQuestsPage: DrawQuests(c, s, y); break;
 		case kQuestDetailPage: DrawQuestDetail(c, s, y); break;
 		case kInfoPage: DrawInfo(c, s, y); break;
@@ -1243,9 +1559,17 @@ namespace Ui
 					g_unread = 0;
 				}
 				if (st.page == kGalleryPage) {
-					g_galFiles = Gallery::List();
+					ReloadPhotos(st.galFilter);
+					st.albumSel = 0;
 					st.galIndex = 0;
 					st.galConfirm = false;
+				}
+				if (st.page == kContactsPage) {
+					g_contactsLoaded = false;
+					st.contactSel = 0;
+				}
+				if (st.page == kRadarPage) {
+					g_radarLoaded = false;
 				}
 				break;
 			default: return Action::kNone;
@@ -1345,7 +1669,36 @@ namespace Ui
 				return Action::kNone;
 			}
 			break;
-		case kGalleryPage: {
+		case kGalleryPage: {  // album list
+			const int n = int(g_albums.size());
+			switch (a_key) {
+			case Key::kUp:
+				if (n) st.albumSel = (st.albumSel + n - 1) % n;
+				break;
+			case Key::kDown:
+				if (n) st.albumSel = (st.albumSel + 1) % n;
+				break;
+			case Key::kLeft:
+			case Key::kRight:
+				st.galFilter = (st.galFilter + (a_key == Key::kRight ? 1 : 2)) % 3;
+				BuildAlbums(st.galFilter);
+				st.albumSel = 0;
+				break;
+			case Key::kEnter:
+				if (!n) {
+					return Action::kNone;
+				}
+				OpenAlbum(st);
+				st.galIndex = 0;
+				st.galConfirm = false;
+				st.page = kPhotoPage;
+				break;
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		}
+		case kPhotoPage: {
 			const int n = int(g_galFiles.size());
 			const bool confirm = st.galConfirm;
 			st.galConfirm = false;  // any other key cancels a pending delete
@@ -1358,27 +1711,80 @@ namespace Ui
 			case Key::kDown:
 				if (n) st.galIndex = (st.galIndex + 1) % n;
 				break;
-			case Key::kEnter:
-				if (!n) {
+			case Key::kEnter: {
+				if (!n || g_albums.empty()) {
 					return Action::kNone;
 				}
 				if (!confirm) {
 					st.galConfirm = true;
+					break;
+				}
+				const auto& album = g_albums[std::clamp(st.albumSel, 0, int(g_albums.size()) - 1)];
+				const auto  idx = album.photos[std::clamp(st.galIndex, 0, int(album.photos.size()) - 1)];
+				const auto  title = album.title;
+				const bool  ok = Gallery::Delete(g_photos[idx]);
+				Log("gallery: %s", ok ? "photo moved to the Recycle Bin" : "delete FAILED");
+				ReloadPhotos(st.galFilter);
+				// stay in the same album if it still has photos
+				const auto it = std::find_if(g_albums.begin(), g_albums.end(), [&](const Album& a) { return a.title == title; });
+				if (it == g_albums.end()) {
+					st.albumSel = 0;
+					st.page = kGalleryPage;
 				} else {
-					const auto path = g_galFiles[std::clamp(st.galIndex, 0, n - 1)];
-					const bool ok = Gallery::Recycle(path);
-					if (g_log) {
-						g_log(ok ? "gallery: photo moved to the Recycle Bin" : "gallery: delete FAILED");
-					}
-					g_galFiles = Gallery::List();
+					st.albumSel = int(it - g_albums.begin());
+					OpenAlbum(st);
 					st.galIndex = std::clamp(st.galIndex, 0, std::max(0, int(g_galFiles.size()) - 1));
 				}
+				break;
+			}
+			case Key::kBack: st.page = kGalleryPage; break;
+			default: return Action::kNone;
+			}
+			break;
+		}
+		case kContactsPage: {
+			const int n = int(g_contacts.size());
+			switch (a_key) {
+			case Key::kUp:
+				if (n) st.contactSel = (st.contactSel + n - 1) % n;
+				break;
+			case Key::kDown:
+				if (n) st.contactSel = (st.contactSel + 1) % n;
+				break;
+			case Key::kEnter:
+				if (!n) {
+					return Action::kNone;
+				}
+				g_callee = g_contacts[std::clamp(st.contactSel, 0, n - 1)];
+				g_callResult.clear();
+				st.page = kCallPage;
 				break;
 			case Key::kBack: st.page = kHome; break;
 			default: return Action::kNone;
 			}
 			break;
 		}
+		case kCallPage:
+			if (a_key == Key::kEnter) {
+				if (g_callee.dead || !g_callee.formID) {
+					return Action::kNone;
+				}
+				act = Action::kSummonContact;
+				g_callResult = "正在请求…";
+			} else if (a_key == Key::kBack) {
+				st.page = kContactsPage;
+			} else {
+				return Action::kNone;
+			}
+			break;
+		case kRadarPage:
+			switch (a_key) {
+			case Key::kLeft: st.radarRange = std::max(0, st.radarRange - 1); break;
+			case Key::kRight: st.radarRange = std::min(int(std::size(kRadarRanges)) - 1, st.radarRange + 1); break;
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
 		default:
 			if (a_key != Key::kBack) {
 				return Action::kNone;
@@ -1441,6 +1847,49 @@ namespace Ui
 	{
 		std::lock_guard lk(g_lock);
 		return g_state.page == kQuestsPage || g_state.page == kQuestDetailPage;
+	}
+
+	bool WantsContacts()
+	{
+		std::lock_guard lk(g_lock);
+		return g_state.page == kContactsPage;
+	}
+
+	void SetContacts(std::vector<Contact> a_list)
+	{
+		std::lock_guard lk(g_lock);
+		g_contacts = std::move(a_list);
+		g_contactsLoaded = true;
+		g_state.contactSel = std::clamp(g_state.contactSel, 0, std::max(0, int(g_contacts.size()) - 1));
+		++g_version;
+	}
+
+	Contact SelectedContact()
+	{
+		std::lock_guard lk(g_lock);
+		return g_state.page == kCallPage ? g_callee : Contact{};
+	}
+
+	void SetCallResult(std::string a_text)
+	{
+		std::lock_guard lk(g_lock);
+		g_callResult = std::move(a_text);
+		++g_version;
+	}
+
+	bool WantsRadar(float& a_range)
+	{
+		std::lock_guard lk(g_lock);
+		a_range = kRadarRanges[std::clamp(g_state.radarRange, 0, int(std::size(kRadarRanges)) - 1)];
+		return g_state.page == kRadarPage;
+	}
+
+	void SetRadar(std::vector<Blip> a_blips)
+	{
+		std::lock_guard lk(g_lock);
+		g_blips = std::move(a_blips);
+		g_radarLoaded = true;
+		++g_version;
 	}
 
 	Info WantsInfo()
@@ -1561,7 +2010,7 @@ namespace Ui
 		const bool  banner = std::chrono::steady_clock::now() < g_bannerUntil;
 		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
 			g_version != g_drawnVersion || banner != g_drawnBanner ||
-			((s.page == kCameraPage || s.page == kGalleryPage) && g_camSeq.load() != g_drawnCamSeq)) {
+			((s.page == kCameraPage || s.page == kPhotoPage) && g_camSeq.load() != g_drawnCamSeq)) {
 			g_drawnCamSeq = g_camSeq.load();
 			g_canvas.Resize(cw, ch);
 			FillBackground(g_canvas);

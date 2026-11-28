@@ -23,6 +23,7 @@
 
 #include "pch.h"
 #include "camera.h"
+#include "gallery.h"
 #include "screen.h"
 #include "tuner.h"
 #include "ui.h"
@@ -477,6 +478,13 @@ namespace
 					}
 					break;
 				}
+				case Ui::Action::kSummonContact: {
+					const auto who = Ui::SelectedContact();
+					if (who.formID && Stats::Summon(who.formID)) {
+						Ui::SetCallResult("“收到，马上到。”");
+					}
+					break;
+				}
 				case Ui::Action::kTakePhoto:
 					// the photo comes from the same source as the viewfinder (the second view once it renders)
 					Camera::RequestPhoto();
@@ -540,11 +548,45 @@ namespace
 				case Ui::Info::kCharacter: Ui::SetInfo(info, Stats::Character()); break;
 				case Ui::Info::kShip: Ui::SetInfo(info, Stats::Ship()); break;
 				case Ui::Info::kMap: Ui::SetInfo(info, Stats::Location()); break;
+				case Ui::Info::kOutposts: Ui::SetInfo(info, Stats::Outposts()); break;
 				default: break;
 				}
 			}
 		} else {
 			nextInfo = std::chrono::steady_clock::now();
+		}
+
+		// Contacts app: every 2 s; Scanner app: 4 times a second
+		static auto nextContacts = std::chrono::steady_clock::now();
+		if (g_open && Ui::WantsContacts()) {
+			if (std::chrono::steady_clock::now() >= nextContacts) {
+				nextContacts = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+				Ui::SetContacts(Stats::Contacts());
+			}
+		} else {
+			nextContacts = std::chrono::steady_clock::now();
+		}
+		static auto nextRadar = std::chrono::steady_clock::now();
+		if (float range = 0; g_open && Ui::WantsRadar(range) && std::chrono::steady_clock::now() >= nextRadar) {
+			nextRadar = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+			Ui::SetRadar(Stats::Radar(range));
+		}
+
+		// photo "GPS": keep the current location for photo tags; tag photo mode photos as they appear
+		static auto nextGeo = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		if (std::chrono::steady_clock::now() >= nextGeo) {
+			nextGeo = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+			Gallery::SetCurrentGeo(Stats::CurrentGeo());
+			static int geoTick = 0;
+			if (++geoTick % 2 == 0) {
+				for (const auto& path : Gallery::PollNewPhotoModePhotos()) {
+					const auto geo = Gallery::CurrentGeo();
+					const auto place = Gallery::PlaceTitle(geo);
+					REX::INFO("gallery: photo mode photo tagged '{}' gps {} {} {}", place, geo.gps, geo.lat, geo.lon);
+					Stats::HudNotify(place.empty() ? "照片已保存（位置未知）" : "照片已记录位置：" + place);
+					(void)path;
+				}
+			}
 		}
 
 		// in-game calendar (home screen, calendar app, message time stamps), twice a second; also while the phone

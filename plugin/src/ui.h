@@ -41,6 +41,7 @@ namespace Ui
 		kTakePhoto,        // camera app: save the viewfinder picture (Camera::RequestPhoto)
 		kSettingsChanged,  // save GetSettings() to the ini
 		kToggleTrack,      // Quests page: track / untrack SelectedQuest()
+		kSummonContact,    // call screen: bring SelectedContact() to the player
 	};
 	Action Input(Key a_key);  // from the game's task thread while the phone is open
 	void   OnOpen();          // phone taken out: back to the home screen
@@ -91,9 +92,35 @@ namespace Ui
 		kCharacter,
 		kShip,
 		kMap,
+		kOutposts,
 	};
 	Info WantsInfo();                                       // which info page is shown (feed it with SetInfo)
 	void SetInfo(Info a_page, std::vector<InfoRow> a_rows);  // empty = not available
+
+	// ---- Contacts app (crew of the home ship) ----
+	struct Contact
+	{
+		std::string   name;
+		std::string   where;            // planet / location, or "附近 12 m"
+		std::uint32_t formID = 0;
+		float         distance = -1.0f;  // metres when loaded near the player, else -1
+		bool          dead = false;
+	};
+	bool    WantsContacts();                          // Contacts page (or a call) is shown
+	void    SetContacts(std::vector<Contact> a_list);  // from the game's task thread
+	Contact SelectedContact();                        // formID 0 if none
+	void    SetCallResult(std::string a_text);         // line shown on the call screen
+
+	// ---- Scanner app ----
+	struct Blip
+	{
+		std::string name;
+		float       right = 0, forward = 0;  // metres relative to the player's heading
+		float       distance = 0;
+		int         kind = 0;  // 0 neutral, 1 hostile, 2 crew, 3 dead
+	};
+	bool WantsRadar(float& a_range);            // Scanner page shown; a_range = radius in metres
+	void SetRadar(std::vector<Blip> a_blips);  // nearest first
 
 	// ---- Messages app ----
 	// add a message (stamped with the current game date / time); shows a banner while the phone is open
