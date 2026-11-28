@@ -38,6 +38,7 @@ namespace Ui
 	{
 		kNone,
 		kOpenPhotoMode,    // camera app: put the phone away, then open the game's photo mode
+		kTakePhoto,        // camera app: save the viewfinder picture (Camera::RequestPhoto)
 		kSettingsChanged,  // save GetSettings() to the ini
 		kToggleTrack,      // Quests page: track / untrack SelectedQuest()
 	};
@@ -69,6 +70,12 @@ namespace Ui
 	QuestEntry SelectedQuest();
 	bool WantsQuests();                                 // the Quests page is open: feed it with SetQuests
 	void SetQuests(std::vector<QuestEntry> a_quests);  // from the game's task thread
+
+	// ---- Camera app (fed from the Present hook, see camera.cpp) ----
+	// true while the Camera page is shown; a_w x a_h = viewfinder size in canvas pixels (its aspect sets the crop)
+	bool CameraTarget(int& a_w, int& a_h);
+	void SetCameraFrame(std::vector<std::uint8_t> a_rgba, int a_w, int a_h);  // RGBA8, a_w x a_h
+	void SetCameraStatus(std::string a_text);                                  // short toast ("已保存 ...")
 
 	// Write the current frame into an R8G8B8A8 texture-sized buffer (a_pitch bytes per row).
 	// Returns false if the UI is not ready (no font).

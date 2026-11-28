@@ -15,6 +15,8 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -327,6 +329,17 @@ namespace
 	Canvas     g_canvas;  // whole upright screen
 	Canvas     g_inner;   // safe area
 
+	// camera: frame and toast come from the render thread's Present hook (own lock, taken after g_lock)
+	std::mutex                g_camLock;
+	std::vector<std::uint8_t> g_camFrame;  // RGBA8
+	int                       g_camFrameW = 0, g_camFrameH = 0;
+	std::string               g_camStatus;
+	std::chrono::steady_clock::time_point g_camStatusUntil{}, g_camFlashUntil{};
+	std::atomic_uint32_t      g_camSeq{ 0 };  // bumped by every new frame / toast
+	std::uint32_t             g_drawnCamSeq = 0;
+	std::atomic_bool          g_camOpen{ false };
+	std::atomic_int           g_camW{ 0 }, g_camH{ 0 };
+
 	void DrawHome(Canvas& c, const State& s)
 	{
 		const Rgb white{ 255, 255, 255 };
@@ -436,18 +449,47 @@ namespace
 		DrawHint(c, "↑↓ 选择   ←→ 调整");
 	}
 
+	// live viewfinder (frames from camera.cpp), shutter button, toast after a photo
 	void DrawCamera(Canvas& c, const State&)
 	{
 		const float H = float(c.h), W = float(c.w);
-		const int   y = DrawHeader(c, "相机", kApps[5].top);
-		const int   d = int(std::min(W * 0.38f, H * 0.3f));
-		const int   cy = y + int(H * 0.08f);
-		RoundRect(c, c.w / 2 - d / 2, cy, d, d, d / 2, { 255, 255, 255 }, { 230, 230, 230 });
-		const int in = int(d * 0.8f);
-		RoundRect(c, c.w / 2 - in / 2, cy + (d - in) / 2, in, in, in / 2, { 240, 240, 240 }, { 200, 200, 205 });
-		const float f = std::max(14.0f, H * 0.046f);
-		TextCentered(c, c.w / 2, cy + d + int(H * 0.06f), "回车：进入拍照模式", f, { 255, 255, 255 });
-		TextCentered(c, c.w / 2, cy + d + int(H * 0.06f) + int(f * 1.5f), "手机会先收起", f * 0.8f, { 190, 200, 220 }, 0.9f);
+		const float f = std::max(12.0f, H * 0.036f);
+		Text(c, int(W * 0.045f), int(H * 0.02f), "‹ 退格返回", f, { 200, 210, 230 }, 0.9f);
+
+		const int vx = int(W * 0.03f), vy = int(H * 0.075f);
+		const int vw = c.w - 2 * vx, vh = int(H * 0.68f);
+		g_camW = vw;
+		g_camH = vh;
+		const auto now = std::chrono::steady_clock::now();
+		{
+			std::lock_guard lk(g_camLock);
+			if (g_camFrameW == vw && g_camFrameH == vh && !g_camFrame.empty()) {
+				for (int y = 0; y < vh; ++y) {
+					if (vy + y >= c.h) break;
+					std::memcpy(&c.px[(std::size_t(vy + y) * c.w + vx) * 4], &g_camFrame[std::size_t(y) * vw * 4], std::size_t(vw) * 4);
+				}
+			} else {
+				RoundRect(c, vx, vy, vw, vh, 0, { 0, 0, 0 }, { 12, 12, 16 });
+				TextCentered(c, c.w / 2, vy + vh / 2 - int(f), "取景中…", f * 1.2f, { 220, 220, 230 });
+			}
+			if (now < g_camFlashUntil) {
+				RoundRect(c, vx, vy, vw, vh, 0, { 255, 255, 255 }, { 255, 255, 255 }, 0.7f);
+			}
+			if (now < g_camStatusUntil && !g_camStatus.empty()) {
+				const int tw = TextWidth(g_camStatus.c_str(), f) + int(f * 1.4f);
+				const int ty = vy + vh - int(f * 2.6f);
+				RoundRect(c, c.w / 2 - tw / 2, ty, tw, int(f * 1.8f), int(f * 0.9f), { 0, 0, 0 }, { 0, 0, 0 }, 0.6f);
+				TextCentered(c, c.w / 2, ty + int(f * 0.3f), g_camStatus.c_str(), f, { 255, 255, 255 });
+			}
+		}
+
+		// shutter
+		const int d = int(std::min(W * 0.2f, H * 0.085f));
+		const int sy = vy + vh + int(H * 0.025f);
+		RoundRect(c, c.w / 2 - d / 2, sy, d, d, d / 2, { 255, 255, 255 }, { 230, 230, 230 });
+		const int in = int(d * 0.78f);
+		RoundRect(c, c.w / 2 - in / 2, sy + (d - in) / 2, in, in, in / 2, { 235, 235, 238 }, { 200, 200, 205 });
+		DrawHint(c, "回车 拍照   ↑ 拍照模式");
 	}
 
 	void DrawQuests(Canvas& c, const State& s)
@@ -631,6 +673,10 @@ namespace Ui
 			break;
 		case kCameraPage:
 			if (a_key == Key::kEnter) {
+				act = Action::kTakePhoto;
+				std::lock_guard ck(g_camLock);
+				g_camFlashUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+			} else if (a_key == Key::kUp) {
 				act = Action::kOpenPhotoMode;
 			} else if (a_key == Key::kBack) {
 				st.page = kHome;
@@ -645,6 +691,7 @@ namespace Ui
 			st.page = kHome;
 			break;
 		}
+		g_camOpen = st.page == kCameraPage;
 		++g_version;
 		return act;
 	}
@@ -653,7 +700,36 @@ namespace Ui
 	{
 		std::lock_guard lk(g_lock);
 		g_state.page = kHome;
+		g_camOpen = false;
 		++g_version;
+	}
+
+	bool CameraTarget(int& a_w, int& a_h)
+	{
+		a_w = g_camW.load();
+		a_h = g_camH.load();
+		return g_camOpen.load() && a_w > 0 && a_h > 0;
+	}
+
+	void SetCameraFrame(std::vector<std::uint8_t> a_rgba, int a_w, int a_h)
+	{
+		{
+			std::lock_guard lk(g_camLock);
+			g_camFrame = std::move(a_rgba);
+			g_camFrameW = a_w;
+			g_camFrameH = a_h;
+		}
+		++g_camSeq;
+	}
+
+	void SetCameraStatus(std::string a_text)
+	{
+		{
+			std::lock_guard lk(g_camLock);
+			g_camStatus = std::move(a_text);
+			g_camStatusUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+		}
+		++g_camSeq;
 	}
 
 	void SetInsets(float a_left, float a_top, float a_right, float a_bottom)
@@ -742,7 +818,8 @@ namespace Ui
 		const int   ch = std::max(16, int(std::lround(cw * s.aspect)));
 		const int   minute = int(s.hour * 60.0f);
 		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
-			g_version != g_drawnVersion) {
+			g_version != g_drawnVersion || (s.page == kCameraPage && g_camSeq.load() != g_drawnCamSeq)) {
+			g_drawnCamSeq = g_camSeq.load();
 			g_canvas.Resize(cw, ch);
 			FillBackground(g_canvas);
 			// draw the page on the safe area: start from the background under it, then paste it back

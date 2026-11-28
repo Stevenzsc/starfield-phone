@@ -283,7 +283,9 @@ namespace
 		if (g_active.load() && a_this->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
 			std::unique_lock lk(g_lock, std::try_to_lock);
 			const auto now = std::chrono::steady_clock::now();
-			if (lk.owns_lock() && g_target && now - last >= std::chrono::milliseconds(66) && InitWriter(g_target)) {
+			int        camW = 0, camH = 0;
+			const auto interval = std::chrono::milliseconds(Ui::CameraTarget(camW, camH) ? 40 : 66);  // viewfinder: 25 fps
+			if (lk.owns_lock() && g_target && now - last >= interval && InitWriter(g_target)) {
 				const int s = g_w.slot;
 				if (g_w.fence->GetCompletedValue() >= g_w.fenceValue[s]) {
 					last = now;

@@ -22,6 +22,7 @@
 // Results go to Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log.
 
 #include "pch.h"
+#include "camera.h"
 #include "screen.h"
 #include "tuner.h"
 #include "ui.h"
@@ -292,6 +293,7 @@ namespace
 				Ui::OnOpen();
 			}
 			Screen::SetActive(g_open);
+			Camera::SetActive(g_open);
 		}
 	}
 
@@ -411,6 +413,9 @@ namespace
 					}
 					break;
 				}
+				case Ui::Action::kTakePhoto:
+					Camera::RequestPhoto();
+					break;
 				case Ui::Action::kOpenPhotoMode:
 					// put the phone away, then open photo mode once the hand is down
 					Perform(kBindings[1]);
@@ -492,6 +497,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 	REX::INFO("PhoneTest loaded; PerformAction ptr at Starfield.exe+0x{:X}", kPerformActionPtr.offset());
 	Ui::Init([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Screen::Install(kScreenWidth, kScreenHeight, [](const char* a_msg) { REX::INFO("{}", a_msg); });
+	Camera::Install([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Tuner::Install();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {
 		REX::ERROR("could not register for SFSE messages");
