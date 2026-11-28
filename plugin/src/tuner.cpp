@@ -665,6 +665,7 @@ namespace
 	// ---- applying the offsets (see Update3D_Hook below for where) ----
 	std::atomic<RE::NiAVObject*> g_hookBones[kBones]{};
 	std::atomic<float>           g_armWeight{ 0.0F };
+	bool                         g_armOffsets = true;  // Tuner::SetArmOffsets: off while the graph plays the camera pose
 	std::mutex                   g_armLock;  // g_arm.bones[] state touched from the update job threads
 
 	void ApplyBoneOffset(int a_bone)
@@ -1372,6 +1373,14 @@ namespace Tuner
 		}
 	}
 
+	void SetArmOffsets(bool a_on)
+	{
+		if (a_on != g_armOffsets) {
+			REX::INFO("arm: runtime bone offsets {}", a_on ? "on" : "off (the graph plays the camera pose)");
+			g_armOffsets = a_on;
+		}
+	}
+
 	void Tick(bool a_isOpen, bool a_keys, bool a_camera)
 	{
 		const auto now = std::chrono::steady_clock::now();
@@ -1489,7 +1498,7 @@ namespace Tuner
 			Apply(use, g_orig[i], g_children[i]->local);
 		}
 		g_applied = mode;
-		if (weight > 0.0F) {
+		if (weight > 0.0F && g_armOffsets) {
 			ArmTick(s);
 		} else {
 			ArmRelease();

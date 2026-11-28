@@ -107,7 +107,8 @@ namespace
 	// (tools/make_test_assets.py writes it). Falls back to the vanilla slate.
 	constexpr const char* kIniPath = "Data\\SFSE\\Plugins\\PhoneTest.ini";
 
-	bool g_devKeys = false;  // dev_keys=1 in the ini: F11 model cycle + numpad tuner
+	bool g_devKeys = false;    // dev_keys=1 in the ini: F11 model cycle + numpad tuner
+	bool g_cameraAnim = true;  // camera_anim=0 in the ini: Camera page arm pose from runtime bone offsets, not the graph
 
 	// screen_rotate=0|90|180|270, screen_mirror=0|1 and screen_aspect=<visible height / width> in PhoneTest.ini:
 	// how the upright UI maps onto the texture.
@@ -171,6 +172,8 @@ namespace
 				st.padOpen = std::atoi(line.c_str() + 9);
 			} else if (line.rfind("dev_keys=", 0) == 0) {
 				g_devKeys = std::atoi(line.c_str() + 9) != 0;
+			} else if (line.rfind("camera_anim=", 0) == 0) {
+				g_cameraAnim = std::atoi(line.c_str() + 12) != 0;
 			}
 		}
 		Ui::SetSettings(st);
@@ -372,8 +375,8 @@ namespace
 		g_preloaded = true;
 	}
 
-	// Returns true when the engine performed the action.
-	bool Perform(const Binding& a_b)
+	// The engine's PerformAction for the player, no phone state changes. Returns true when the engine performed it.
+	bool PerformRaw(const Binding& a_b)
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
 		auto* form = RE::TESForm::LookupByID(a_b.formID);
@@ -396,7 +399,13 @@ namespace
 		data.source = player;
 		data.action = form;
 
-		const bool ok = fn(&data);
+		return fn(&data);
+	}
+
+	// Returns true when the engine performed the action.
+	bool Perform(const Binding& a_b)
+	{
+		const bool ok = PerformRaw(a_b);
 		REX::INFO("{} ({:08X}) -> PerformAction returned {}", a_b.name, a_b.formID, ok);
 		if (ok) {
 			g_lastAction = std::chrono::steady_clock::now();
@@ -420,6 +429,74 @@ namespace
 			BlockGameInput(false);
 		}
 		return ok;
+	}
+
+	// ---- Camera page hold animation ----
+	// The phone's Camera page plays a real 1st-person animation: the mod's Human_1stPersonRoot.agx adds a PhoneCamera
+	// state to the dataslate state machine (Idle <-> PhoneCamera on events PhoneCameraIn / PhoneCameraOut, file
+	// PhoneCamera_DataSlate.af; tools/make_camera_graph.py, tools/make_camera_anim.py).
+	// The 1st-person graph only takes events through actions (console sae does not reach it), so the event goes out
+	// through the vanilla close: IDLE Human_1stPersonRoot_DataSlateClose (0026FCC9, played by ActionDataSlateClose)
+	// carries its graph event as a BSFixedString; for one PerformAction call it carries ours instead, then the
+	// original pointer goes back. The field is found by value: pooled strings share one entry, so the IDLE holds the
+	// same pointer as our BSFixedString("DataSlateClose").
+	constexpr std::uint32_t kIdleDataSlateClose = 0x0026FCC9;
+
+	bool SendSlateEvent(bool a_in)
+	{
+		static const RE::BSFixedString close("DataSlateClose");
+		static const RE::BSFixedString in("PhoneCameraIn");
+		static const RE::BSFixedString out("PhoneCameraOut");
+		static std::ptrdiff_t          field = -1;
+		const RE::BSFixedString&       ev = a_in ? in : out;
+
+		auto* idle = RE::TESForm::LookupByID(kIdleDataSlateClose);
+		if (!idle || !close.hash_accessor()) {
+			REX::WARN("camera hold: IDLE {:08X} not found", kIdleDataSlateClose);
+			return false;
+		}
+		const auto base = reinterpret_cast<std::uintptr_t>(idle);
+		if (field < 0) {
+			for (std::ptrdiff_t off = 0x30; off < 0x200; off += 8) {
+				if (*reinterpret_cast<const void* const*>(base + off) == close.hash_accessor()) {
+					field = off;
+					break;
+				}
+			}
+			REX::INFO("camera hold: IDLE {:08X} event field at +0x{:X}", kIdleDataSlateClose, field);
+			if (field < 0) {
+				return false;
+			}
+		}
+		auto* slot = reinterpret_cast<const void**>(base + field);
+		if (*slot != close.hash_accessor()) {
+			REX::WARN("camera hold: IDLE event field changed, not sending {}", ev.c_str());
+			return false;
+		}
+		*slot = ev.hash_accessor();
+		const bool ok = PerformRaw(kBindings[1]);
+		*slot = close.hash_accessor();
+		REX::INFO("camera hold: {} -> PerformAction returned {}", ev.c_str(), ok);
+		return ok;
+	}
+
+	// Camera page edges: enter / leave the PhoneCamera state. Without the animation (camera_anim=0, or the event did
+	// not go through) the arm takes the runtime bone offsets as before. Closing the phone from the Camera page needs
+	// nothing: the graph goes PhoneCamera -> Unequip on DataSlateClose.
+	void CameraHoldTick(bool a_open, bool a_on)
+	{
+		static bool held = false;
+		if (!a_open || !g_cameraAnim) {
+			held = false;
+			Tuner::SetArmOffsets(true);
+			return;
+		}
+		if (a_on == held) {
+			return;
+		}
+		held = a_on;
+		const bool ok = SendSlateEvent(a_on);
+		Tuner::SetArmOffsets(!(a_on && ok));
 	}
 
 	// PhoneTest.ini camera_crop=x0,y0,x1,y1 (fractions of the screen) and camera_hide_hud=0/1, re-read every second
@@ -741,6 +818,7 @@ namespace
 		{
 			int        cw = 0, ch = 0;
 			const bool cameraPage = g_open && Ui::CameraTarget(cw, ch);
+			CameraHoldTick(g_open, cameraPage);
 			Tuner::Tick(g_open, g_devKeys, cameraPage);
 			CameraPageTick(cameraPage);
 		}
