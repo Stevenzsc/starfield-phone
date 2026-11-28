@@ -475,10 +475,7 @@ namespace
 			Tuner::SetFirstPersonHidden(false);
 			g_photoHiding = false;
 		}
-		{
-			int cw = 0, ch = 0;
-			ViewProbe::SetSecondView(g_open && Ui::CameraTarget(cw, ch));  // second-view prototype: Camera page only
-		}
+		// second-view prototype (ViewProbe::SetSecondView) is off: output 01000004 is not rendered in normal play
 		Tuner::Tick(g_open && g_devKeys);
 
 		// Quests app: refresh every 2 s while its page is open
