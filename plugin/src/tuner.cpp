@@ -824,6 +824,116 @@ namespace
 	std::atomic<std::uintptr_t> g_poseComp{ 0 };
 	std::atomic_uint32_t       g_poseUpdates{ 0 };
 
+	// ---- the pose array itself ----
+	// Overriding the NiNode transforms right after the component update changed nothing on screen (offsets applied
+	// every frame, logged): the renderer takes the bones from the component's arrays, the nodes are copies. So the
+	// offsets go into the component's local array before it computes. Bone indices: a table of node pointers in or
+	// under the component whose entry for the clavicle points at our clavicle node.
+	struct ArrState
+	{
+		std::uintptr_t comp = 0;
+		std::uintptr_t table = 0;  // node pointer table (bone index -> NiNode*)
+		int            index[kBones] = { -1, -1, -1, -1 };
+		bool           searched = false;
+		bool           ok = false;
+		float          animRot[kBones][12]{};  // the animation's rotation rows of each entry (with padding)
+		float          written[kBones][12]{};
+		bool           haveWritten[kBones]{};
+	} g_arr;
+
+	// (g_armLock held)
+	void FindBoneTable(std::uintptr_t a_comp, std::uint16_t a_count)
+	{
+		g_arr = {};
+		g_arr.comp = a_comp;
+		g_arr.searched = true;
+		const auto clav = reinterpret_cast<std::uintptr_t>(g_arm.bones[0].node);
+		// candidate tables: pointers stored in the component (0x200 bytes), in its +0x10 block (0x100 bytes), and
+		// the +0x10 of each of those (arrays sit at +0x10 of a header, like the transform arrays)
+		std::uintptr_t cands[256];
+		int            n = 0;
+		for (std::uintptr_t base : { a_comp, ReadPtr(a_comp + 0x10) }) {
+			for (std::uintptr_t off = 0; base && off < (base == a_comp ? 0x200u : 0x100u) && n < 250; off += 8) {
+				const auto v = ReadPtr(base + off);
+				if (v > 0x10000) {
+					cands[n++] = v;
+					const auto inner = ReadPtr(v + 0x10);
+					if (inner > 0x10000) cands[n++] = inner;
+				}
+			}
+		}
+		for (int c = 0; c < n; ++c) {
+			const auto tbl = cands[c];
+			for (int i = 0; i < a_count; ++i) {
+				if (ReadPtr(tbl + std::uintptr_t(i) * 8) != clav) {
+					continue;
+				}
+				// clavicle at i: look up the other bones in the same table
+				int  idx[kBones] = { i, -1, -1, -1 };
+				bool all = true;
+				for (int b = 1; b < kBones; ++b) {
+					const auto node = reinterpret_cast<std::uintptr_t>(g_arm.bones[b].node);
+					for (int k = 0; k < a_count; ++k) {
+						if (ReadPtr(tbl + std::uintptr_t(k) * 8) == node) {
+							idx[b] = k;
+							break;
+						}
+					}
+					all = all && idx[b] >= 0;
+				}
+				REX::INFO("arm: node table {:X}: clavicle {}, upper arm {}, forearm {}, wrist {}", tbl, idx[0], idx[1], idx[2], idx[3]);
+				if (all) {
+					g_arr.table = tbl;
+					for (int b = 0; b < kBones; ++b) g_arr.index[b] = idx[b];
+					g_arr.ok = true;
+					return;
+				}
+			}
+		}
+		REX::WARN("arm: no bone node table found in the pose component ({} candidates)", n);
+	}
+
+	// (g_armLock held) before the component computes: offsets into the local array entries
+	void ApplyArrayOffsets(std::uintptr_t a_comp)
+	{
+		const auto    block = ReadPtr(a_comp + 0x10);
+		const auto    locals = block ? ReadPtr(ReadPtr(block + 0x08) + 0x10) : 0;
+		std::uint16_t count = 0;
+		SafeCopy(reinterpret_cast<const void*>(a_comp + 0x78), &count, sizeof(count));
+		if (!locals || count < 8 || count > 1024) {
+			return;
+		}
+		if (!g_arr.searched || g_arr.comp != a_comp) {
+			FindBoneTable(a_comp, count);
+		}
+		if (!g_arr.ok) {
+			return;
+		}
+		const float w = g_armWeight.load();
+		for (int b = 0; b < kBones; ++b) {
+			auto* e = reinterpret_cast<float*>(locals + std::uintptr_t(g_arr.index[b]) * 0x40);
+			const bool fresh = !g_arr.haveWritten[b] || std::memcmp(e, g_arr.written[b], sizeof(g_arr.written[b])) != 0;
+			if (fresh) {
+				std::memcpy(g_arr.animRot[b], e, sizeof(g_arr.animRot[b]));
+			}
+			if (w <= 0.0F) {
+				if (!fresh) std::memcpy(e, g_arr.animRot[b], sizeof(g_arr.animRot[b]));
+				g_arr.haveWritten[b] = false;
+				continue;
+			}
+			RE::NiTransform anim{};
+			std::memcpy(&anim, g_arr.animRot[b], sizeof(g_arr.animRot[b]));
+			Xf off;
+			off.rot = g_boneRot[b];
+			const Mat d = w >= 1.0F ? g_boneRot[b] : Blend(Xf{}, off, w).rot;
+			RE::NiTransform out = anim;
+			SetMat(out.rotate, Mul(MatOf(anim), d));
+			std::memcpy(e, &out, sizeof(g_arr.written[b]));
+			std::memcpy(g_arr.written[b], e, sizeof(g_arr.written[b]));
+			g_arr.haveWritten[b] = true;
+		}
+	}
+
 	std::uintptr_t PoseUpdate_Hook(void* a_comp, void* a_2, void* a_3, void* a_4)
 	{
 		PoseUpdate_t orig = nullptr;
@@ -833,6 +943,10 @@ namespace
 				orig = h.orig;
 				break;
 			}
+		}
+		if (reinterpret_cast<std::uintptr_t>(a_comp) == g_poseComp.load() && g_hookBones[0].load()) {
+			std::lock_guard lk(g_armLock);
+			ApplyArrayOffsets(reinterpret_cast<std::uintptr_t>(a_comp));
 		}
 		const std::uintptr_t r = orig ? orig(a_comp, a_2, a_3, a_4) : 0;
 		if (reinterpret_cast<std::uintptr_t>(a_comp) == g_poseComp.load() && g_hookBones[0].load()) {
@@ -955,6 +1069,7 @@ namespace
 		std::lock_guard lk(g_armLock);
 		g_arm = {};
 		g_pose = {};
+		g_arr = {};
 		g_poseComp = 0;
 	}
 
