@@ -25,6 +25,9 @@ namespace Stats
 	std::vector<Ui::Blip>    Radar(float a_range);    // loaded actors within a_range metres
 	std::vector<Ui::InfoRow> Outposts();              // the player's outpost beacons
 
+	// photo mode: record the location (photo camera position) at the shutter press (Gallery::QueueShotGeo)
+	void InstallPhotoModeHook();
+
 	// show a line in the game's HUD notification area (Papyrus Debug.Notification)
 	void HudNotify(const std::string& a_utf8);
 }

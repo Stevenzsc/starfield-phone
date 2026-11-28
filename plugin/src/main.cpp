@@ -579,12 +579,10 @@ namespace
 			Gallery::SetCurrentGeo(Stats::CurrentGeo());
 			static int geoTick = 0;
 			if (++geoTick % 2 == 0) {
-				for (const auto& path : Gallery::PollNewPhotoModePhotos()) {
-					const auto geo = Gallery::CurrentGeo();
+				for (const auto& [path, geo] : Gallery::PollNewPhotoModePhotos()) {
 					const auto place = Gallery::PlaceTitle(geo);
 					REX::INFO("gallery: photo mode photo tagged '{}' gps {} {} {}", place, geo.gps, geo.lat, geo.lon);
 					Stats::HudNotify(place.empty() ? "照片已保存（位置未知）" : "照片已记录位置：" + place);
-					(void)path;
 				}
 			}
 		}
@@ -655,6 +653,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 	Screen::WatchViewTarget(ViewProbe::kTargetWidth, ViewProbe::kTargetHeight);
 	Camera::Install([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Tuner::Install();
+	Stats::InstallPhotoModeHook();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {
 		REX::ERROR("could not register for SFSE messages");
 	}

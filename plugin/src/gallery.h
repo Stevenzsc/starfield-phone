@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Photos for the Camera and Gallery apps: the phone's own (PNG files in Documents\My Games\Starfield\PhoneCamera)
@@ -46,12 +47,15 @@ namespace Gallery
 	std::wstring       PhotoModeDir();  // the game's photo mode folder ("" if missing)
 	std::vector<Photo> List();          // both sources, newest first, with their tags
 
-	// tag a photo with the current location (phone photos when saved, photo mode photos when they appear)
+	// tag a photo with the current location (phone photos when saved)
 	void TagCurrent(const std::wstring& a_path);
 
-	// photo mode photos that appeared since the last call, already tagged with the current location.
-	// The first call only records what is there.
-	std::vector<std::wstring> PollNewPhotoModePhotos();
+	// photo mode shutter pressed: the location of that moment, used for the next photo mode file that appears
+	void QueueShotGeo(const Geo& a_geo);
+
+	// photo mode photos that appeared since the last call, tagged with the location queued at the shutter press (or the
+	// current one if none was queued). The first call only records what is there.
+	std::vector<std::pair<std::wstring, Geo>> PollNewPhotoModePhotos();
 
 	// Decode a photo and scale it to fit inside a_maxW x a_maxH (aspect kept). RGBA8 out.
 	bool Load(const std::wstring& a_path, int a_maxW, int a_maxH, std::vector<std::uint8_t>& a_rgba, int& a_w, int& a_h);

@@ -18,7 +18,9 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <cstdio>
 #include <cwctype>
 #include <fstream>
@@ -36,6 +38,12 @@ namespace
 	Gallery::Geo                        g_geo;
 	std::map<std::string, Gallery::Geo> g_tags;  // key: "phone|name" / "mode|name" (lower case)
 	bool                                g_tagsLoaded = false;
+	struct Shot
+	{
+		Gallery::Geo                          geo;
+		std::chrono::steady_clock::time_point at;
+	};
+	std::deque<Shot> g_shots;  // photo mode shutter presses not yet matched to a file
 
 	std::string Utf8(const std::wstring& a_w)
 	{
@@ -272,23 +280,43 @@ namespace Gallery
 		SaveTags();
 	}
 
-	std::vector<std::wstring> PollNewPhotoModePhotos()
+	void QueueShotGeo(const Geo& a_geo)
 	{
-		static std::set<std::wstring> known;
-		static bool                   first = true;
-		static std::wstring           dir;
-		std::vector<std::wstring>     fresh;
+		std::lock_guard lk(g_lock);
+		g_shots.push_back({ a_geo, std::chrono::steady_clock::now() });
+		while (g_shots.size() > 16) g_shots.pop_front();
+	}
+
+	std::vector<std::pair<std::wstring, Geo>> PollNewPhotoModePhotos()
+	{
+		static std::set<std::wstring>             known;
+		static bool                               first = true;
+		static std::wstring                       dir;
+		std::vector<std::pair<std::wstring, Geo>> fresh;
 		if (dir.empty()) {
 			dir = PhotoModeDir();
 			if (dir.empty()) return fresh;
 		}
 		std::vector<Photo> now;
 		Scan(dir, L"Photo_*.png", Source::kPhotoMode, now);
+		std::sort(now.begin(), now.end(), [](const Photo& a, const Photo& b) { return a.time < b.time; });  // oldest first
 		for (const auto& p : now) {
-			if (known.insert(p.path).second && !first) {
-				TagCurrent(p.path);
-				fresh.push_back(p.path);
+			if (!known.insert(p.path).second || first) {
+				continue;
 			}
+			std::lock_guard lk(g_lock);
+			LoadTags();
+			// the shutter press that made this file (files appear in shot order); stale presses (no file) are dropped
+			const auto cutoff = std::chrono::steady_clock::now() - std::chrono::minutes(10);
+			while (!g_shots.empty() && g_shots.front().at < cutoff) g_shots.pop_front();
+			Geo geo = g_geo;
+			if (!g_shots.empty()) {
+				geo = g_shots.front().geo;
+				g_shots.pop_front();
+			}
+			g_tags[KeyOf(p.path)] = geo;
+			SaveTags();
+			fresh.emplace_back(p.path, geo);
 		}
 		first = false;
 		return fresh;

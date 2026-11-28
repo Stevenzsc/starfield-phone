@@ -465,7 +465,8 @@ namespace
 
 namespace Stats
 {
-	Gallery::Geo CurrentGeo()
+	// a_pos: position for lat / lon (the photo mode camera), else the player's
+	Gallery::Geo GeoWith(const Pos* a_pos)
 	{
 		Gallery::Geo g;
 		auto*        p = Player();
@@ -486,7 +487,7 @@ namespace Stats
 			constexpr double toDeg = 180.0 / 3.14159265358979323846;
 			const double     lon0 = At<double>(pm, 0x98) * toDeg, lat0 = At<double>(pm, 0xA0) * toDeg;
 			const double     R = double(radiusKm) * 1000.0;
-			const auto       pos = PosOf(p);
+			const auto       pos = a_pos ? *a_pos : PosOf(p);
 			g.lat = std::clamp(lat0 + pos.y / R * toDeg, -90.0, 90.0);
 			g.lon = lon0 + pos.x / (R * std::max(0.01, std::cos(lat0 / toDeg))) * toDeg;
 			while (g.lon > 180) g.lon -= 360;
@@ -503,6 +504,8 @@ namespace Stats
 		}
 		return g;
 	}
+
+	Gallery::Geo CurrentGeo() { return GeoWith(nullptr); }
 
 	std::vector<Ui::Contact> Contacts()
 	{
@@ -621,4 +624,60 @@ namespace Stats
 	}
 
 	void HudNotify(const std::string& a_utf8) { RunNative(kNotification, a_utf8); }
+}
+
+// ---- photo mode shutter ----
+// PhotoModeMenu handles the UI event PhotoMode_TakeSnapshot in its BSTEventSink<PhotoMode_TakeSnapshot> part (menu
+// +0x160, RTTI). That sub-vtable is ID 443439 (Starfield.exe+0x4C85BC8, COL offset 0x160); slot 1 = ProcessEvent
+// FUN_1416000D0, which sets the menu's "take snapshot" flag. The slot is replaced to record the location first.
+// The photo mode camera: world holder (ID 936470) +0x80 = "World Camera" NiCamera, world translate at +0xB0.
+namespace
+{
+	constexpr REL::ID kSnapshotSinkVtbl{ 443439 };
+	constexpr REL::ID kWorldHolder{ 936470 };
+
+	using ProcessEvent_t = std::uint32_t (*)(void*, const void*, void*);
+	ProcessEvent_t g_origSnapshot = nullptr;
+
+	bool CameraPos(Pos& a_out)
+	{
+		const auto holder = *reinterpret_cast<const std::uint8_t* const*>(kWorldHolder.address());
+		const auto cam = holder ? At<const std::uint8_t*>(holder, 0x80) : nullptr;
+		if (!cam) return false;
+		a_out = { At<float>(cam, 0xB0), At<float>(cam, 0xB4), At<float>(cam, 0xB8) };
+		return std::isfinite(a_out.x) && std::isfinite(a_out.y);
+	}
+
+	std::uint32_t OnSnapshot(void* a_sink, const void* a_event, void* a_source)
+	{
+		auto* p = Player();
+		if (p && At<void*>(p, 0xB0)) {
+			const auto me = PosOf(p);
+			Pos        cam{};
+			// the photo mode camera can fly ~100 m from the player: use it when it is plausibly in the same frame
+			const bool useCam = CameraPos(cam) && Distance(cam, me) < 150.0f;
+			const auto geo = Stats::GeoWith(useCam ? &cam : nullptr);
+			Gallery::QueueShotGeo(geo);
+			REX::INFO("photomode: shutter at '{}' gps {} {:.5f} {:.5f} (camera {} {:.1f} {:.1f} {:.1f}, player {:.1f} {:.1f} {:.1f})",
+				Gallery::PlaceTitle(geo), geo.gps, geo.lat, geo.lon, useCam, cam.x, cam.y, cam.z, me.x, me.y, me.z);
+		}
+		return g_origSnapshot(a_sink, a_event, a_source);
+	}
+}
+
+namespace Stats
+{
+	void InstallPhotoModeHook()
+	{
+		auto* slot = reinterpret_cast<std::uintptr_t*>(kSnapshotSinkVtbl.address() + 8);
+		std::uint32_t old = 0;
+		if (!REX::W32::VirtualProtect(slot, sizeof(*slot), REX::W32::PAGE_READWRITE, &old)) {
+			REX::ERROR("photomode: VirtualProtect failed");
+			return;
+		}
+		g_origSnapshot = reinterpret_cast<ProcessEvent_t>(*slot);
+		*slot = reinterpret_cast<std::uintptr_t>(&OnSnapshot);
+		REX::W32::VirtualProtect(slot, sizeof(*slot), old, &old);
+		REX::INFO("photomode: shutter hook installed (original {:X})", reinterpret_cast<std::uintptr_t>(g_origSnapshot));
+	}
 }
