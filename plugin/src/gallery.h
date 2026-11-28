@@ -60,6 +60,9 @@ namespace Gallery
 	// Decode a photo and scale it to fit inside a_maxW x a_maxH (aspect kept). RGBA8 out.
 	bool Load(const std::wstring& a_path, int a_maxW, int a_maxH, std::vector<std::uint8_t>& a_rgba, int& a_w, int& a_h);
 
+	// picture size from the PNG header, without decoding (for laying out the grid)
+	bool Size(const std::wstring& a_path, int& a_w, int& a_h);
+
 	// move the photo (and its photo mode thumbnail) to the Recycle Bin and forget its tag
 	bool Delete(const Photo& a_photo);
 }

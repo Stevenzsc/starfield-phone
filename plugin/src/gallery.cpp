@@ -368,6 +368,24 @@ namespace Gallery
 		return true;
 	}
 
+	bool Size(const std::wstring& a_path, int& a_w, int& a_h)
+	{
+		// PNG: 8-byte signature, then the IHDR chunk (length, "IHDR", width, height; big-endian)
+		FILE* f = _wfopen(a_path.c_str(), L"rb");
+		if (!f) {
+			return false;
+		}
+		unsigned char h[24] = {};
+		const bool    read = std::fread(h, 1, sizeof(h), f) == sizeof(h);
+		std::fclose(f);
+		if (!read || h[0] != 0x89 || h[1] != 'P' || h[12] != 'I' || h[13] != 'H') {
+			return false;
+		}
+		a_w = int((unsigned(h[16]) << 24) | (unsigned(h[17]) << 16) | (unsigned(h[18]) << 8) | h[19]);
+		a_h = int((unsigned(h[20]) << 24) | (unsigned(h[21]) << 16) | (unsigned(h[22]) << 8) | h[23]);
+		return a_w > 0 && a_h > 0;
+	}
+
 	bool Delete(const Photo& a_photo)
 	{
 		std::wstring from = a_photo.path;

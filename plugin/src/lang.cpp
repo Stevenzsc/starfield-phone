@@ -83,6 +83,8 @@ namespace
 			{ "未知位置", "Unknown location" },
 			{ "没有位置记录的照片", "Photos without a location" },
 			{ "%d 张", "%d photos" },
+			{ "查看", "View" },
+			{ "未知日期", "Unknown date" },
 			{ "还没有照片", "No photos yet" },
 			{ "手机相机或拍照模式拍的照片会出现在这里", "Phone camera and photo mode shots appear here" },
 			{ "这个相册是空的", "This album is empty" },

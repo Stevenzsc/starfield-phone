@@ -22,7 +22,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdarg>
+#include <cstdlib>
+#include <deque>
+#include <map>
+#include <set>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -151,6 +156,7 @@ namespace
 	{
 		int                       w = 0, h = 0;
 		std::vector<std::uint8_t> px;  // RGBA
+		int                       clipY0 = 0, clipY1 = 1 << 30;  // rows drawn (a scrolling list sets these)
 
 		void Resize(int a_w, int a_h)
 		{
@@ -160,7 +166,7 @@ namespace
 		}
 		void Blend(int x, int y, Rgb c, float a)
 		{
-			if (x < 0 || y < 0 || x >= w || y >= h || a <= 0) {
+			if (x < 0 || y < clipY0 || x >= w || y >= h || y >= clipY1 || a <= 0) {
 				return;
 			}
 			a = std::min(a, 1.0f);
@@ -457,6 +463,7 @@ namespace
 		kCallPage,
 		kRadarPage,
 		kMusicPage,
+		kGridPage,  // one album as a masonry grid, newest first, by day (between the album list and kPhotoPage)
 	};
 
 	constexpr float kRadarRanges[] = { 25.0f, 50.0f, 100.0f, 200.0f };
@@ -561,6 +568,31 @@ namespace
 	std::vector<std::uint8_t> g_galImg;      // RGBA8; empty = could not be opened
 	int                       g_galImgW = 0, g_galImgH = 0, g_galImgMaxW = 0, g_galImgMaxH = 0;
 	bool                      g_galLoading = false;
+	std::vector<std::pair<int, int>> g_galDims;  // picture size of each g_galFiles entry (0, 0 = unknown), g_lock
+
+	// grid thumbnails: decoded on one worker thread, newest request first (g_camLock; a finished one bumps g_camSeq)
+	struct Thumb
+	{
+		std::vector<std::uint8_t> px;  // RGBA8; empty = could not be decoded
+		int                       w = 0, h = 0;
+	};
+	std::map<std::wstring, Thumb> g_thumbs;
+	std::deque<std::wstring>      g_thumbQueue;
+	std::set<std::wstring>        g_thumbPending;
+	int                           g_thumbWidth = 0;  // tile width the cache was decoded for
+	std::condition_variable       g_thumbCv;
+	bool                          g_thumbWorker = false;
+
+	// grid layout of the last draw (g_lock): content coordinates, y = 0 at the top of the list
+	struct GridItem
+	{
+		int x = 0, y = 0, w = 0, h = 0;
+	};
+	std::vector<GridItem> g_gridItems;
+	bool                  g_gridReset = true;  // next draw: jump to the selection without scrolling
+	float                 g_gridFrom = 0, g_gridTo = 0;
+	bool                  g_gridAnim = false;
+	std::chrono::steady_clock::time_point g_gridStart{};
 
 	// ---- transitions (iOS-like) ----
 	// A page change snapshots what is on screen (g_shown), draws the new page once into g_inner, and then only
@@ -1096,10 +1128,61 @@ namespace
 	void OpenAlbum(const State& s)
 	{
 		g_galFiles.clear();
+		g_galDims.clear();
 		if (g_albums.empty()) return;
 		for (const int i : g_albums[std::clamp(s.albumSel, 0, int(g_albums.size()) - 1)].photos) {
 			g_galFiles.push_back(g_photos[i].display);
+			int w = 0, h = 0;
+			if (!Gallery::Size(g_photos[i].display, w, h)) w = h = 0;
+			g_galDims.emplace_back(w, h);
 		}
+	}
+
+	void ThumbWorker()
+	{
+		for (;;) {
+			std::wstring path;
+			int          width = 0;
+			{
+				std::unique_lock lk(g_camLock);
+				g_thumbCv.wait(lk, [] { return !g_thumbQueue.empty(); });
+				path = g_thumbQueue.back();  // the newest request is on screen now
+				g_thumbQueue.pop_back();
+				width = g_thumbWidth;
+			}
+			Thumb t;
+			if (!Gallery::Load(path, width, width * 3, t.px, t.w, t.h)) t.px.clear();
+			{
+				std::lock_guard lk(g_camLock);
+				g_thumbPending.erase(path);
+				if (width == g_thumbWidth) {
+					if (g_thumbs.size() > 240) g_thumbs.clear();  // simple bound: about 240 x 50 KB
+					g_thumbs[path] = std::move(t);
+				}
+			}
+			++g_camSeq;
+		}
+	}
+
+	// (g_camLock held) the thumbnail of a_path, or nullptr after queueing it
+	const Thumb* ThumbFor(const std::wstring& a_path, int a_width)
+	{
+		if (a_width != g_thumbWidth) {
+			g_thumbs.clear();
+			g_thumbQueue.clear();
+			g_thumbPending.clear();
+			g_thumbWidth = a_width;
+		}
+		if (const auto it = g_thumbs.find(a_path); it != g_thumbs.end()) return &it->second;
+		if (g_thumbPending.insert(a_path).second) {
+			g_thumbQueue.push_back(a_path);
+			if (!g_thumbWorker) {
+				g_thumbWorker = true;
+				std::thread(ThumbWorker).detach();
+			}
+			g_thumbCv.notify_one();
+		}
+		return nullptr;
 	}
 
 	void ReloadPhotos(int a_filter)
@@ -1250,6 +1333,145 @@ namespace
 		ty += int(f * 1.4f);
 		const auto gps = photo.tagged ? Gallery::GpsText(photo.geo) : std::string{};
 		Text(c, pad + int(f * 0.6f), ty, gps.empty() ? Tr("GPS 无信号") : ("GPS  " + gps).c_str(), f * 0.85f, kDim);
+	}
+
+	// day of a photo for the grid's section headers: in-game date when tagged, else the real-world capture date
+	std::string DayOf(const Gallery::Photo& a_p)
+	{
+		if (a_p.tagged && !a_p.geo.date.empty()) {
+			const auto sp = a_p.geo.date.rfind(' ');  // "<date> 14:05"
+			return sp == std::string::npos ? a_p.geo.date : a_p.geo.date.substr(0, sp);
+		}
+		return a_p.caption.size() >= 10 ? a_p.caption.substr(0, 10) : std::string(Tr("未知日期"));
+	}
+
+	// one album as a masonry grid: newest first, a header for each day, each photo in the shorter column at its own
+	// aspect; the selection frame slides and the list scrolls smoothly to keep it in view
+	void DrawGrid(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const int   n = int(g_galFiles.size());
+		const int   bottom = n ? Prompts(c, { { "↑↓←→", Tr("选择") }, { "Enter", Tr("查看") }, { Tr("退格"), Tr("返回") } }) :
+		                         Prompts(c, { { Tr("退格"), Tr("返回") } });
+		if (!n || g_albums.empty()) {
+			const int y = Header(c, a_y, Tr("相册"));
+			TextCentered(c, c.w / 2, y + int(H * 0.15f), Tr("这个相册是空的"), std::max(16.0f, H * 0.05f), kText);
+			return;
+		}
+		const auto& album = g_albums[std::clamp(s.albumSel, 0, int(g_albums.size()) - 1)];
+		char        note[32];
+		std::snprintf(note, sizeof(note), Tr("%d 张"), n);
+		const float tf = std::max(18.0f, H * 0.062f);
+		const int   top = Header(c, a_y, Fit(album.title, tf, int(c.w * 0.62f)).c_str(), note);
+		const int   viewH = std::max(1, bottom - int(H * 0.01f) - top);
+		// layout (content coordinates)
+		const int   cols = W > H ? 3 : 2;
+		const int   gap = std::max(4, int(W * 0.02f));
+		const int   colW = (c.w - 2 * pad - (cols - 1) * gap) / cols;
+		const float hf = std::max(11.0f, H * 0.032f);
+		const int   headH = int(hf * 1.8f);
+		struct Head
+		{
+			int         y;
+			std::string text;
+		};
+		std::vector<Head> heads;
+		std::vector<int>  colY(std::size_t(cols), 0);
+		g_gridItems.assign(std::size_t(n), {});
+		std::string day;
+		for (int i = 0; i < n && i < int(album.photos.size()); ++i) {
+			const auto& p = g_photos[album.photos[i]];
+			const auto  d = DayOf(p);
+			if (i == 0 || d != day) {  // new day: below every column
+				day = d;
+				int y0 = *std::max_element(colY.begin(), colY.end());
+				if (i > 0) y0 += gap;
+				heads.push_back({ y0, d });
+				std::fill(colY.begin(), colY.end(), y0 + headH);
+			}
+			const auto [pw, ph] = i < int(g_galDims.size()) ? g_galDims[i] : std::pair<int, int>{ 0, 0 };
+			const float aspect = pw > 0 && ph > 0 ? float(ph) / float(pw) : 0.5625f;
+			const int   h = std::clamp(int(colW * aspect), colW / 2, colW * 2);
+			const int   col = int(std::min_element(colY.begin(), colY.end()) - colY.begin());
+			g_gridItems[i] = { pad + col * (colW + gap), colY[col], colW, h };
+			colY[col] += h + gap;
+		}
+		const int total = *std::max_element(colY.begin(), colY.end());
+		// scroll: keep the selection (and its day header) in view
+		const int   sel = std::clamp(s.galIndex, 0, n - 1);
+		const auto& si = g_gridItems[sel];
+		const float maxScroll = float(std::max(0, total - viewH));
+		float       target = g_gridReset ? 0.0f : g_gridTo;
+		if (si.y - headH < target) target = float(si.y - headH);
+		if (si.y + si.h + gap > target + viewH) target = float(si.y + si.h + gap - viewH);
+		target = std::clamp(target, 0.0f, maxScroll);
+		const auto now = std::chrono::steady_clock::now();
+		float      scroll = target;
+		if (g_gridReset) {
+			g_gridReset = false;
+			g_gridTo = g_gridFrom = target;
+			g_gridAnim = false;
+		} else {
+			float cur = g_gridTo;
+			if (g_gridAnim) {
+				const float t = std::chrono::duration<float>(now - g_gridStart).count() / kScrollSeconds;
+				cur = t >= 1.0f ? g_gridTo : g_gridFrom + (g_gridTo - g_gridFrom) * Spring(t);
+				if (t >= 1.0f) g_gridAnim = false;
+			}
+			if (target != g_gridTo) {
+				g_gridFrom = cur;
+				g_gridTo = target;
+				g_gridStart = now;
+				g_gridAnim = true;
+			}
+			scroll = cur;
+		}
+		g_selMoving = g_selMoving || g_gridAnim;
+		const int oy = top - int(std::lround(scroll));
+		c.clipY0 = top;
+		c.clipY1 = top + viewH;
+		for (const auto& h : heads) {
+			if (oy + h.y > top + viewH || oy + h.y + headH < top) continue;
+			Text(c, pad, oy + h.y + int(hf * 0.2f), h.text.c_str(), hf, kStripe[1]);
+			const int tw = TextWidth(h.text.c_str(), hf) + int(hf * 0.6f);
+			Rect(c, pad + tw, oy + h.y + int(hf * 0.82f), c.w - 2 * pad - tw, 1, kLine);
+		}
+		{
+			std::lock_guard lk(g_camLock);
+			for (int i = 0; i < n; ++i) {
+				const auto& it = g_gridItems[i];
+				const int   y = oy + it.y;
+				if (y > top + viewH || y + it.h < top) continue;
+				Rect(c, it.x, y, it.w, it.h, kPanel);
+				const Thumb* t = ThumbFor(g_galFiles[i], colW);
+				if (!t || t->px.empty()) {
+					if (t) TextCentered(c, it.x + it.w / 2, y + it.h / 2 - int(hf * 0.6f), "×", hf, kDim);
+					continue;
+				}
+				// centre the decoded picture in the tile (cropped when the tile is shorter)
+				const int dx = it.x + (it.w - t->w) / 2, dy = y + (it.h - t->h) / 2;
+				const int x0 = std::max(it.x, dx), x1 = std::min({ it.x + it.w, dx + t->w, c.w });
+				const int y0 = std::max({ y, dy, top, 0 }), y1 = std::min({ y + it.h, dy + t->h, top + viewH, c.h });
+				for (int yy = y0; yy < y1 && x1 > x0; ++yy) {
+					std::memcpy(&c.px[(std::size_t(yy) * c.w + x0) * 4], &t->px[(std::size_t(yy - dy) * t->w + (x0 - dx)) * 4],
+						std::size_t(x1 - x0) * 4);
+				}
+			}
+		}
+		// selection frame (content coordinates, so it does not lag behind the scroll)
+		const FRect box = SelBox(kGridPage, { si.x, si.y, si.w, si.h });
+		const int   b = std::max(3, int(W * 0.006f));
+		Frame(c, int(std::lround(box.x)) - b, oy + int(std::lround(box.y)) - b, int(std::lround(box.w)) + 2 * b,
+			int(std::lround(box.h)) + 2 * b, b, kSelBg);
+		c.clipY0 = 0;
+		c.clipY1 = 1 << 30;
+		// scroll bar
+		if (total > viewH) {
+			const int bh = std::max(int(H * 0.04f), viewH * viewH / total);
+			const int by = top + int((viewH - bh) * (scroll / std::max(1.0f, maxScroll)));
+			Rect(c, c.w - pad / 2 - 1, by, 2, bh, kDim, 0.8f);
+		}
 	}
 
 	void DrawQuests(Canvas& c, const State& s, int a_y)
@@ -1892,8 +2114,9 @@ namespace
 		switch (a_page) {
 		case kHome: return 0;
 		case kQuestDetailPage:
-		case kPhotoPage:
+		case kGridPage:
 		case kCallPage: return 2;
+		case kPhotoPage: return 3;
 		default: return 1;
 		}
 	}
@@ -1911,6 +2134,7 @@ namespace
 		case kCameraPage: DrawCamera(c, s, y); break;
 		case kGalleryPage: DrawAlbums(c, s, y); break;
 		case kPhotoPage: DrawPhoto(c, s, y); break;
+		case kGridPage: DrawGrid(c, s, y); break;
 		case kContactsPage: DrawContacts(c, s, y); break;
 		case kCallPage: DrawCall(c, s, y); break;
 		case kRadarPage: DrawRadar(c, s, y); break;
@@ -2234,9 +2458,68 @@ namespace Ui
 				OpenAlbum(st);
 				st.galIndex = 0;
 				st.galConfirm = false;
-				st.page = kPhotoPage;
+				g_gridReset = true;
+				st.page = kGridPage;
 				break;
 			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		}
+		case kGridPage: {  // masonry grid of one album; galIndex is the selected photo
+			const int  n = int(g_galFiles.size());
+			const bool laid = int(g_gridItems.size()) == n;
+			auto       centre = [](const GridItem& a) { return a.y + a.h / 2; };
+			switch (a_key) {
+			case Key::kUp:
+			case Key::kDown: {
+				if (!n) break;
+				if (!laid) {
+					st.galIndex = std::clamp(st.galIndex + (a_key == Key::kDown ? 1 : -1), 0, n - 1);
+					break;
+				}
+				// the nearest photo above / below in the same column
+				const auto& cur = g_gridItems[std::clamp(st.galIndex, 0, n - 1)];
+				int         best = -1;
+				for (int i = 0; i < n; ++i) {
+					const auto& it = g_gridItems[i];
+					if (it.x != cur.x) continue;
+					const bool ok = a_key == Key::kDown ? it.y > cur.y : it.y < cur.y;
+					if (ok && (best < 0 || std::abs(it.y - cur.y) < std::abs(g_gridItems[best].y - cur.y))) best = i;
+				}
+				if (best >= 0) st.galIndex = best;
+				break;
+			}
+			case Key::kLeft:
+			case Key::kRight: {
+				if (!n) break;
+				const int step = a_key == Key::kRight ? 1 : -1;
+				if (!laid) {
+					st.galIndex = std::clamp(st.galIndex + step, 0, n - 1);
+					break;
+				}
+				// the next column over, nearest in height; past the outer column: the previous / next photo in time
+				const auto& cur = g_gridItems[std::clamp(st.galIndex, 0, n - 1)];
+				int         nextX = -1;
+				for (const auto& it : g_gridItems) {
+					if (step > 0 ? it.x > cur.x && (nextX < 0 || it.x < nextX) : it.x < cur.x && (nextX < 0 || it.x > nextX)) nextX = it.x;
+				}
+				int best = -1;
+				for (int i = 0; nextX >= 0 && i < n; ++i) {
+					if (g_gridItems[i].x != nextX) continue;
+					if (best < 0 || std::abs(centre(g_gridItems[i]) - centre(cur)) < std::abs(centre(g_gridItems[best]) - centre(cur))) best = i;
+				}
+				st.galIndex = best >= 0 ? best : std::clamp(st.galIndex + step, 0, n - 1);
+				break;
+			}
+			case Key::kEnter:
+				if (!n) {
+					return Action::kNone;
+				}
+				st.galConfirm = false;
+				st.page = kPhotoPage;
+				break;
+			case Key::kBack: st.page = kGalleryPage; break;
 			default: return Action::kNone;
 			}
 			break;
@@ -2280,7 +2563,7 @@ namespace Ui
 				}
 				break;
 			}
-			case Key::kBack: st.page = kGalleryPage; break;
+			case Key::kBack: st.page = kGridPage; break;
 			default: return Action::kNone;
 			}
 			break;
@@ -2604,7 +2887,7 @@ namespace Ui
 		if (g_canvas.w != cw || g_canvas.h != ch || g_inner.w != iw || g_inner.h != ih || minute != g_drawnMinute ||
 			s.day != g_drawn.day || g_version != g_drawnVersion || g_selMoving || nowPlaying != musicPlaying ||
 			(s.page == kMusicPage && Music::Seq() != musicSeq) ||
-			((s.page == kCameraPage || s.page == kPhotoPage) && g_camSeq.load() != g_drawnCamSeq)) {
+			((s.page == kCameraPage || s.page == kPhotoPage || s.page == kGridPage) && g_camSeq.load() != g_drawnCamSeq)) {
 			g_drawnCamSeq = g_camSeq.load();
 			musicSeq = Music::Seq();
 			musicPlaying = nowPlaying;
