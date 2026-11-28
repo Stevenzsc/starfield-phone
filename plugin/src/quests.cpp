@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 
 namespace
 {
@@ -21,7 +22,19 @@ namespace
 	constexpr std::ptrdiff_t kObjCount = 0x148;
 	constexpr std::ptrdiff_t kObjArray = 0x150;
 	constexpr std::ptrdiff_t kObjState = 0x28;
-	constexpr int            kStateDisplayed = 1;
+	constexpr std::ptrdiff_t kObjIndex = 0x24;
+	constexpr std::uint32_t  kActivities = 0x000475F8;  // QuestTypeActivities
+
+	// objective state -> what the mission menu shows: 0 nothing, 1 in progress, 2 completed, 3 failed
+	int ShownState(int a_state)
+	{
+		switch (a_state) {
+		case 1: return 1;
+		case 3: return 2;
+		case 5: return 3;
+		default: return 0;
+		}
+	}
 	// Quest.IsActive / SetActive (Papyrus natives registered in FUN_1420CCAF0): "active" = tracked = bit 11 (0x800)
 	// of +0x114. SetActive's native (FUN_1420CDE80, ID 119077) flips that bit, calls FUN_141A42E70 first when
 	// activating, then notifies with FUN_140CF2750; its VM and stack-ID arguments are unused.
@@ -174,14 +187,21 @@ namespace Quests
 			Ui::QuestEntry entry;
 			for (std::uint32_t k = 0; k < count; ++k) {
 				const void* o = objs[k];
-				if (!o || Read<int>(o, kObjState) != kStateDisplayed) {
+				if (!o) {
 					continue;
 				}
-				const auto& text = *reinterpret_cast<const RE::BSFixedString*>(o);
-				auto        t = Clean(text.c_str());
-				if (!t.empty()) {
-					entry.objectives.push_back(std::move(t));
+				const int shown = ShownState(Read<int>(o, kObjState));
+				if (!shown) {
+					continue;
 				}
+				auto t = Clean(reinterpret_cast<const RE::BSFixedString*>(o)->c_str());
+				if (t.empty()) {
+					continue;
+				}
+				if (shown == 1) {
+					entry.objectives.push_back(t);
+				}
+				entry.details.push_back({ std::move(t), shown });
 			}
 			if (entry.objectives.empty()) {
 				continue;
@@ -194,7 +214,19 @@ namespace Quests
 			entry.tracked = (Read<std::uint32_t>(q, kQuestFlags) & kTrackedBit) != 0;
 			const auto* type = TypeOf(q);
 			entry.group = type ? type->label : "其他";
-			keyed.push_back({ type ? type->rank : 99, Read<std::uint8_t>(q, kDnamPriority), q, std::move(entry) });
+			const auto prio = Read<std::uint8_t>(q, kDnamPriority);
+			if (type && type->keyword == kActivities) {
+				// Activities are "pointer" quests whose name is a developer placeholder (e.g. "霓虹城Z01的封装" =
+				// "FFNeonZ01 wrapper"); the game's mission menu lists them by objective, so the phone does too.
+				for (const auto& o : entry.objectives) {
+					Ui::QuestEntry one = entry;
+					one.name = o;
+					one.objectives.clear();
+					keyed.push_back({ type->rank, prio, q, std::move(one) });
+				}
+				continue;
+			}
+			keyed.push_back({ type ? type->rank : 99, prio, q, std::move(entry) });
 		}
 		// like the game's mission menu: main, factions, side, missions, activities, others; then priority
 		std::stable_sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) {
@@ -214,6 +246,73 @@ namespace Quests
 		}
 		logged = logged || !keyed.empty();
 		return result;
+	}
+
+	std::vector<Change> PollChanges(bool a_silent)
+	{
+		static std::unordered_map<std::uint64_t, int> last;  // (quest form ID << 16 | objective index) -> state
+		static bool                                   baseline = false;
+		std::vector<Change>                           changes;
+		if (!g_scanned) {
+			ScanQuests();
+		}
+		std::size_t seen = 0;
+		for (const RE::TESForm* q : g_quests) {
+			const auto count = Read<std::uint32_t>(q, kObjCount);
+			const auto objs = Read<const void* const*>(q, kObjArray);
+			if (!objs || count == 0 || count > 1024) {
+				continue;
+			}
+			for (std::uint32_t k = 0; k < count; ++k) {
+				const void* o = objs[k];
+				if (!o) {
+					continue;
+				}
+				const int  state = Read<int>(o, kObjState);
+				const auto key = (std::uint64_t(q->GetFormID()) << 16) | Read<std::uint16_t>(o, kObjIndex);
+				auto [it, added] = last.try_emplace(key, state);
+				if (added && state == 0) {
+					continue;
+				}
+				const int before = added ? 0 : it->second;
+				it->second = state;
+				if (before == state) {
+					continue;
+				}
+				++seen;
+				const int   now = ShownState(state), was = ShownState(before);
+				const char* what = nullptr;
+				if (now == 1 && was != 1) {
+					what = "新目标：";
+				} else if (now == 2 && was != 2) {
+					what = "已完成：";
+				} else if (now == 3 && was != 3) {
+					what = "已失败：";
+				}
+				if (!what || !baseline || a_silent) {
+					continue;
+				}
+				auto text = Clean(reinterpret_cast<const RE::BSFixedString*>(o)->c_str());
+				if (text.empty()) {
+					continue;
+				}
+				const auto* type = TypeOf(q);
+				std::string title = type && type->keyword == kActivities ? std::string(type->label) : Clean(QuestName(q));
+				if (title.empty()) {
+					title = "任务";
+				}
+				changes.push_back({ std::move(title), what + text });
+			}
+		}
+		// a save load changes many objectives at once: record silently
+		if (!baseline || a_silent || changes.size() > 6) {
+			if (seen) {
+				REX::INFO("quests: {} objective changes recorded silently (baseline {}, silent {})", seen, baseline, a_silent);
+			}
+			baseline = true;
+			changes.clear();
+		}
+		return changes;
 	}
 
 	bool SetTracked(std::uint32_t a_formID, bool a_tracked)

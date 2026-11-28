@@ -369,14 +369,31 @@ namespace
 		int         icon;   // Segoe Fluent / MDL2 code point
 	};
 	constexpr App kApps[] = {
-		{ "联系人", "人", 0xE77B },  // Contact
+		{ "消息", "信", 0xE8BD },    // Message
 		{ "任务", "务", 0xE7C1 },    // Flag
-		{ "星图", "星", 0xE774 },    // Globe
-		{ "前哨站", "哨", 0xE80F },  // Home
+		{ "角色", "角", 0xE77B },    // Contact
 		{ "飞船", "船", 0xE709 },    // Airplane
+		{ "星图", "星", 0xE774 },    // Globe
+		{ "日历", "历", 0xE787 },    // Calendar
 		{ "相机", "相", 0xE722 },    // Camera
 		{ "相册", "册", 0xE8B9 },    // Picture
+		{ "联系人", "人", 0xE716 },  // People
+		{ "前哨站", "哨", 0xE80F },  // Home
 		{ "设置", "设", 0xE713 },    // Settings
+	};
+	enum AppId
+	{
+		kAppMessages,
+		kAppQuests,
+		kAppCharacter,
+		kAppShip,
+		kAppMap,
+		kAppCalendar,
+		kAppCamera,
+		kAppGallery,
+		kAppContacts,
+		kAppOutposts,
+		kAppSettings,
 	};
 
 	struct State
@@ -396,9 +413,14 @@ namespace
 		int openKey = 0;
 		// quests
 		int questScroll = 0;  // selected quest (drawn first, highlighted)
+		int detailScroll = 0; // first objective row on the quest details page
 		// gallery
 		int  galIndex = 0;         // shown photo (0 = newest)
 		bool galConfirm = false;   // Enter pressed once: the next Enter deletes
+		// info pages / messages
+		int  infoScroll = 0;       // first row shown
+		int  msgScroll = 0;        // first message shown
+		bool msgConfirm = false;   // Enter pressed once: the next Enter clears all
 		// safe area (fractions of the upright screen)
 		float insetL = 0, insetT = 0, insetR = 0, insetB = 0;
 	};
@@ -411,17 +433,36 @@ namespace
 		kCameraPage,
 		kGalleryPage,
 		kPlaceholderPage,
+		kQuestDetailPage,
+		kInfoPage,
+		kCalendarPage,
+		kMessagesPage,
 	};
 
 	// app index -> page (order of kApps)
 	int PageFor(int a_app)
 	{
 		switch (a_app) {
-		case 1: return kQuestsPage;
-		case 5: return kCameraPage;
-		case 6: return kGalleryPage;
-		case 7: return kSettingsPage;
+		case kAppMessages: return kMessagesPage;
+		case kAppQuests: return kQuestsPage;
+		case kAppCharacter:
+		case kAppShip:
+		case kAppMap: return kInfoPage;
+		case kAppCalendar: return kCalendarPage;
+		case kAppCamera: return kCameraPage;
+		case kAppGallery: return kGalleryPage;
+		case kAppSettings: return kSettingsPage;
 		default: return kPlaceholderPage;
+		}
+	}
+
+	Ui::Info InfoFor(int a_app)
+	{
+		switch (a_app) {
+		case kAppCharacter: return Ui::Info::kCharacter;
+		case kAppShip: return Ui::Info::kShip;
+		case kAppMap: return Ui::Info::kMap;
+		default: return Ui::Info::kNone;
 		}
 	}
 
@@ -444,6 +485,19 @@ namespace
 	unsigned   g_drawnVersion = 0;
 	std::vector<Ui::QuestEntry> g_quests;   // guarded by g_lock
 	bool                        g_questsLoaded = false;
+	// info pages (g_lock)
+	Ui::Info                 g_infoPage = Ui::Info::kNone;  // page g_infoRows belongs to
+	std::vector<Ui::InfoRow> g_infoRows;
+	// messages (g_lock), newest first
+	struct Message
+	{
+		std::string title, text, stamp;
+	};
+	std::vector<Message>                  g_messages;
+	int                                   g_unread = 0;
+	std::string                           g_bannerTitle, g_bannerText;
+	std::chrono::steady_clock::time_point g_bannerUntil{};
+	bool                                  g_drawnBanner = false;
 	Canvas     g_canvas;  // whole upright screen
 	Canvas     g_inner;   // safe area
 
@@ -485,6 +539,14 @@ namespace
 		char        clock[16];
 		ClockText(s, clock);
 		Text(c, pad, y, clock, f, kText);
+		if (g_unread > 0) {  // unread messages: envelope + count after the clock
+			const int mx = pad + TextWidth(clock, f) + int(f * 0.6f);
+			const int my = y + int(f * 0.2f), mh = int(f * 0.66f), mw = int(mh * 1.35f);
+			Rect(c, mx, my, mw, mh, kGold);
+			char n[8];
+			std::snprintf(n, sizeof(n), "%d", std::min(g_unread, 99));
+			Text(c, mx + mw + int(f * 0.25f), y + int(f * 0.06f), n, f * 0.85f, kGold);
+		}
 
 		const int bh = int(f * 0.62f), bw = int(bh * 2.1f);
 		const int bx = c.w - pad - bw - 3, by = y + int(f * 0.22f);
@@ -606,6 +668,14 @@ namespace
 				TextCentered(c, x + tile / 2, y + tile / 2 - int(tile * 0.24f), a.glyph, tile * 0.42f, fg);
 			}
 			TextCentered(c, x + tile / 2, y + tile + int(labelF * 0.3f), a.label, labelF, sel ? kText : kDim);
+			if (i == kAppMessages && g_unread > 0) {  // unread badge on the Messages tile
+				char n[8];
+				std::snprintf(n, sizeof(n), "%d", std::min(g_unread, 99));
+				const float bf = std::max(10.0f, tile * 0.22f);
+				const int   bw = std::max(int(bf * 1.3f), TextWidth(n, bf) + int(bf * 0.6f)), bh = int(bf * 1.3f);
+				Rect(c, x + tile - bw + int(bf * 0.3f), y - int(bf * 0.3f), bw, bh, kWarn);
+				TextCentered(c, x + tile - bw / 2 + int(bf * 0.3f), y - int(bf * 0.3f) + int(bf * 0.1f), n, bf, kText);
+			}
 		}
 	}
 
@@ -768,7 +838,7 @@ namespace
 		const float objF = std::max(11.0f, H * 0.035f);
 		const bool  any = g_questsLoaded && !g_quests.empty();
 		const int   first = any ? std::clamp(s.questScroll, 0, int(g_quests.size()) - 1) : 0;
-		const int   bottom = any ? Prompts(c, { { "↑↓", "选择" }, { "Enter", g_quests[first].tracked ? "取消追踪" : "追踪" }, { "退格", "返回" } }) :
+		const int   bottom = any ? Prompts(c, { { "↑↓", "选择" }, { "Enter", "详情" }, { "退格", "返回" } }) :
 		                           Prompts(c, { { "退格", "返回" } });
 		char        note[32] = "";
 		if (any) {
@@ -833,6 +903,251 @@ namespace
 		}
 	}
 
+	// first wrapped line, with "…" when the text is longer
+	std::string Fit(const std::string& a_text, float a_px, int a_maxW)
+	{
+		const auto lines = Wrap(a_text, a_px, a_maxW - TextWidth("…", a_px));
+		if (lines.empty()) return {};
+		return lines.size() > 1 ? lines[0] + "…" : lines[0];
+	}
+
+	// one quest: name, tracking, every displayed objective (open box = in progress, check = done, cross = failed)
+	void DrawQuestDetail(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h);
+		const int   pad = Pad(c);
+		const float nameF = std::max(15.0f, H * 0.05f);
+		const float objF = std::max(11.0f, H * 0.037f);
+		if (g_quests.empty()) {
+			Prompts(c, { { "退格", "返回" } });
+			const int y = Header(c, a_y, "任务详情");
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "没有进行中的任务", nameF * 0.85f, kDim);
+			return;
+		}
+		const auto& q = g_quests[std::clamp(s.questScroll, 0, int(g_quests.size()) - 1)];
+		const int   bottom = Prompts(c, { { "↑↓", "滚动" }, { "Enter", q.tracked ? "取消追踪" : "追踪" }, { "退格", "返回" } });
+		int         y = Header(c, a_y, "任务详情", q.group.c_str());
+		for (const auto& l : Wrap(q.name, nameF, c.w - 2 * pad)) {
+			Text(c, pad, y, l.c_str(), nameF, q.tracked ? kGold : kText);
+			y += int(nameF * 1.3f);
+		}
+		Text(c, pad, y + int(objF * 0.2f), q.tracked ? "◆ 正在追踪" : "未追踪", objF, q.tracked ? kGold : kDim);
+		y += int(objF * 1.9f);
+		Rect(c, pad, y, c.w - 2 * pad, 1, kLine);
+		y += int(H * 0.02f);
+		const int limit = bottom - int(H * 0.01f);
+		const int indent = int(objF * 1.6f);
+		const int n = int(q.details.size());
+		for (int i = std::clamp(s.detailScroll, 0, std::max(0, n - 1)); i < n; ++i) {
+			const auto& o = q.details[i];
+			if (y + int(objF * 1.3f) > limit) break;
+			const Rgb col = o.state == 1 ? kText : (o.state == 2 ? kDim : kWarn);
+			const int ms = int(objF * 0.6f), mx = pad + int(objF * 0.2f), my = y + int(objF * 0.35f);
+			if (o.state == 1) {
+				Frame(c, mx, my, ms, ms, 2, kText);
+			} else if (o.state == 2) {
+				if (HasIcon(0xE73E)) Icon(c, mx + ms / 2, my + ms / 2, 0xE73E, objF * 0.8f, kDim);
+				else Rect(c, mx, my, ms, ms, kDim);
+			} else {
+				Text(c, mx, y, "×", objF, kWarn);
+			}
+			for (const auto& l : Wrap(o.text, objF, c.w - 2 * pad - indent)) {
+				if (y + int(objF * 1.3f) > limit) break;
+				Text(c, pad + indent, y, l.c_str(), objF, col);
+				y += int(objF * 1.3f);
+			}
+			y += int(objF * 0.55f);
+		}
+	}
+
+	// label / value rows with optional bars and section headers (Character, Ship, Star map)
+	void DrawInfo(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const int   bottom = Prompts(c, { { "↑↓", "滚动" }, { "退格", "返回" } });
+		int         y = Header(c, a_y, kApps[s.openedApp].label);
+		const float f = std::max(13.0f, H * 0.042f);
+		if (g_infoPage != InfoFor(s.openedApp)) {
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), "读取中…", f, kDim);
+			return;
+		}
+		if (g_infoRows.empty()) {
+			TextCentered(c, c.w / 2, y + int(H * 0.1f), s.openedApp == kAppShip ? "没有家园飞船" : "暂无数据", f, kDim);
+			return;
+		}
+		const int limit = bottom - int(H * 0.01f);
+		const int inner = int(W * 0.02f);
+		const int barH = std::max(3, int(H * 0.008f));
+		const int n = int(g_infoRows.size());
+		for (int i = std::clamp(s.infoScroll, 0, n - 1); i < n; ++i) {
+			const auto& r = g_infoRows[i];
+			if (r.header) {
+				if (y + int(f * 1.7f) > limit) break;
+				y += int(f * 0.3f);
+				const float hf = f * 0.8f;
+				Text(c, pad, y, r.label.c_str(), hf, kStripe[1]);
+				const int gw = TextWidth(r.label.c_str(), hf) + int(hf * 0.6f);
+				Rect(c, pad + gw, y + int(hf * 0.62f), c.w - 2 * pad - gw, 1, kLine);
+				y += int(f * 1.4f);
+				continue;
+			}
+			const int lw = TextWidth(r.label.c_str(), f);
+			const int avail = c.w - 2 * pad - 2 * inner;
+			const int vw = TextWidth(r.value.c_str(), f);
+			const bool twoLines = lw + int(f) + vw > avail;
+			const auto valueLines = twoLines ? Wrap(r.value, f, avail) : std::vector<std::string>{ r.value };
+			int h = int(f * 1.5f) + (twoLines ? int(f * 1.3f) * int(valueLines.size()) : 0) + (r.fraction >= 0 ? barH + int(f * 0.4f) : 0);
+			if (y + h > limit) break;
+			Text(c, pad + inner, y, r.label.c_str(), f, kDim);
+			int yy = y;
+			if (twoLines) {
+				for (const auto& l : valueLines) {
+					yy += int(f * 1.3f);
+					Text(c, pad + inner, yy, l.c_str(), f, kText);
+				}
+			} else {
+				Text(c, c.w - pad - inner - vw, y, r.value.c_str(), f, kText);
+			}
+			if (r.fraction >= 0) {
+				const int by = yy + int(f * 1.4f);
+				const int bw = c.w - 2 * pad - 2 * inner;
+				Rect(c, pad + inner, by, bw, barH, kPanel);
+				Rect(c, pad + inner, by, int(bw * r.fraction), barH, r.fraction < 0.25f ? kWarn : kText);
+			}
+			y += h + int(f * 0.35f);
+			Rect(c, pad, y - int(f * 0.2f), c.w - 2 * pad, 1, kLine, 0.5f);
+		}
+	}
+
+	bool Leap(int a_y) { return (a_y % 4 == 0 && a_y % 100 != 0) || a_y % 400 == 0; }
+
+	int DaysIn(int a_y, int a_m0)
+	{
+		constexpr int d[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+		return a_m0 == 1 && Leap(a_y) ? 29 : d[std::clamp(a_m0, 0, 11)];
+	}
+
+	// 0 = Sunday (Sakamoto)
+	int Weekday(int a_y, int a_m0, int a_d)
+	{
+		constexpr int t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+		const int     m = std::clamp(a_m0, 0, 11);
+		const int     y = m < 2 ? a_y - 1 : a_y;
+		return (y + y / 4 - y / 100 + y / 400 + t[m] + a_d) % 7;
+	}
+
+	constexpr const char* kWeekdays[] = { "日", "一", "二", "三", "四", "五", "六" };
+
+	void DrawCalendar(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		Prompts(c, { { "退格", "返回" } });
+		char note[16];
+		std::snprintf(note, sizeof(note), "%u年", s.year);
+		int y = Header(c, a_y, "日历", note);
+		const int year = int(s.year), m0 = int(s.month), day = int(s.day);
+		// time and the full date
+		char clock[16];
+		ClockText(s, clock);
+		const float clockF = std::min(H * 0.1f, W * 0.16f);
+		Text(c, pad, y, clock, clockF, kText);
+		y += int(clockF * 1.05f);
+		char date[64];
+		std::snprintf(date, sizeof(date), "%d年%d月%d日  星期%s", year, m0 + 1, day, kWeekdays[Weekday(year, m0, day)]);
+		const float dateF = std::max(13.0f, H * 0.038f);
+		Text(c, pad, y, date, dateF, kDim);
+		y += int(dateF * 1.8f);
+		// month grid
+		char month[16];
+		std::snprintf(month, sizeof(month), "%d月", m0 + 1);
+		const float mf = std::max(13.0f, H * 0.042f);
+		Text(c, pad, y, month, mf, kStripe[1]);
+		const int mw = TextWidth(month, mf) + int(mf * 0.6f);
+		Rect(c, pad + mw, y + int(mf * 0.62f), c.w - 2 * pad - mw, 1, kLine);
+		y += int(mf * 1.6f);
+		const int   cellW = (c.w - 2 * pad) / 7;
+		const float cf = std::max(11.0f, std::min(H * 0.036f, cellW * 0.42f));
+		const int   cellH = int(cf * 2.0f);
+		for (int i = 0; i < 7; ++i) {
+			TextCentered(c, pad + i * cellW + cellW / 2, y, kWeekdays[i], cf * 0.9f, i == 0 || i == 6 ? kStripe[1] : kDim);
+		}
+		y += int(cf * 1.7f);
+		const int first = Weekday(year, m0, 1);
+		const int days = DaysIn(year, m0);
+		for (int d = 1; d <= days; ++d) {
+			const int slot = first + d - 1;
+			const int x = pad + (slot % 7) * cellW, cy = y + (slot / 7) * cellH;
+			char      num[4];
+			std::snprintf(num, sizeof(num), "%d", d);
+			if (d == day) {
+				Rect(c, x + int(cellW * 0.08f), cy - int(cf * 0.3f), cellW - int(cellW * 0.16f), int(cf * 1.6f), kSelBg);
+			}
+			TextCentered(c, x + cellW / 2, cy, num, cf, d == day ? kSelText : kText);
+		}
+	}
+
+	void DrawMessages(Canvas& c, const State& s, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const int   n = int(g_messages.size());
+		const int   bottom = n ? Prompts(c, { { "↑↓", "滚动" }, { "Enter", s.msgConfirm ? "确认清除" : "全部清除" }, { "退格", "返回" } }) :
+		                         Prompts(c, { { "退格", "返回" } });
+		char note[16] = "";
+		if (n) {
+			std::snprintf(note, sizeof(note), "%d 条", n);
+		}
+		int         y = Header(c, a_y, "消息", n ? note : nullptr);
+		const float textF = std::max(12.0f, H * 0.038f);
+		const float titleF = textF * 0.82f;
+		if (!n) {
+			TextCentered(c, c.w / 2, y + int(H * 0.12f), "没有消息", std::max(16.0f, H * 0.05f), kText);
+			TextCentered(c, c.w / 2, y + int(H * 0.12f) + int(H * 0.08f), "任务目标更新、升级会出现在这里", textF * 0.9f, kDim);
+			return;
+		}
+		const int limit = bottom - int(H * 0.01f);
+		const int inner = int(W * 0.03f);
+		const int gap = int(H * 0.015f);
+		int       shown = 0;
+		for (int i = std::clamp(s.msgScroll, 0, n - 1); i < n; ++i) {
+			const auto& m = g_messages[i];
+			const auto  lines = Wrap(m.text, textF, c.w - 2 * pad - 2 * inner);
+			const int   h = int(titleF * 1.7f) + int(textF * 1.3f) * int(lines.size()) + int(textF * 0.5f);
+			if (shown > 0 && y + h > limit) break;
+			Rect(c, pad, y, c.w - 2 * pad, std::min(h, limit - y), kPanel, 0.9f);
+			Rect(c, pad, y, 3, std::min(h, limit - y), kStripe[1]);
+			const int sw = TextWidth(m.stamp.c_str(), titleF);
+			Text(c, pad + inner, y + int(titleF * 0.4f), Fit(m.title, titleF, c.w - 2 * pad - 3 * inner - sw).c_str(), titleF, kStripe[1]);
+			Text(c, c.w - pad - inner - sw, y + int(titleF * 0.4f), m.stamp.c_str(), titleF, kDim);
+			int ty = y + int(titleF * 1.7f);
+			for (const auto& l : lines) {
+				if (ty + int(textF * 1.3f) > limit) break;
+				Text(c, pad + inner, ty, l.c_str(), textF, kText);
+				ty += int(textF * 1.3f);
+			}
+			y += h + gap;
+			++shown;
+			if (y > limit) break;
+		}
+	}
+
+	// new-message banner under the status bar (any page)
+	void DrawBanner(Canvas& c, int a_y)
+	{
+		const float H = float(c.h), W = float(c.w);
+		const int   pad = Pad(c);
+		const float f = std::max(12.0f, H * 0.036f);
+		const int   inner = int(W * 0.03f);
+		const int   y = a_y + int(H * 0.01f), h = int(f * 3.1f);
+		Rect(c, pad, y, c.w - 2 * pad, h, kBgTop, 0.96f);
+		Frame(c, pad, y, c.w - 2 * pad, h, 1, kLine);
+		Rect(c, pad, y, 4, h, kStripe[1]);
+		Text(c, pad + inner, y + int(f * 0.25f), Fit(g_bannerTitle, f * 0.82f, c.w - 2 * pad - 2 * inner).c_str(), f * 0.82f, kStripe[1]);
+		Text(c, pad + inner, y + int(f * 1.45f), Fit(g_bannerText, f, c.w - 2 * pad - 2 * inner).c_str(), f, kText);
+	}
+
 	void DrawPlaceholder(Canvas& c, const State& s, int a_y)
 	{
 		const float H = float(c.h);
@@ -850,7 +1165,14 @@ namespace
 		case kCameraPage: DrawCamera(c, s, y); break;
 		case kGalleryPage: DrawGallery(c, s, y); break;
 		case kQuestsPage: DrawQuests(c, s, y); break;
+		case kQuestDetailPage: DrawQuestDetail(c, s, y); break;
+		case kInfoPage: DrawInfo(c, s, y); break;
+		case kCalendarPage: DrawCalendar(c, s, y); break;
+		case kMessagesPage: DrawMessages(c, s, y); break;
 		default: DrawPlaceholder(c, s, y); break;
+		}
+		if (std::chrono::steady_clock::now() < g_bannerUntil && s.page != kMessagesPage) {
+			DrawBanner(c, y);
 		}
 	}
 }
@@ -894,15 +1216,31 @@ namespace Ui
 			switch (a_key) {
 			case Key::kLeft: st.homeSel = (st.homeSel + n - 1) % n; break;
 			case Key::kRight: st.homeSel = (st.homeSel + 1) % n; break;
-			case Key::kUp: st.homeSel = (st.homeSel + n - cols) % n; break;
-			case Key::kDown: st.homeSel = (st.homeSel + cols) % n; break;
+			case Key::kUp:
+				if (st.homeSel >= cols) st.homeSel -= cols;
+				break;
+			case Key::kDown:
+				if (st.homeSel + cols < n) st.homeSel += cols;
+				else if (st.homeSel / cols < (n - 1) / cols) st.homeSel = n - 1;  // short last row
+				break;
 			case Key::kEnter:
 				st.openedApp = st.homeSel;
 				st.page = PageFor(st.homeSel);
 				st.setSel = 0;
 				st.questScroll = 0;
+				st.detailScroll = 0;
+				st.infoScroll = 0;
+				st.msgScroll = 0;
+				st.msgConfirm = false;
 				if (st.page == kQuestsPage) {
 					g_questsLoaded = false;
+				}
+				if (st.page == kInfoPage) {
+					g_infoPage = Ui::Info::kNone;  // "loading" until the game thread fills it
+					g_infoRows.clear();
+				}
+				if (st.page == kMessagesPage) {
+					g_unread = 0;
 				}
 				if (st.page == kGalleryPage) {
 					g_galFiles = Gallery::List();
@@ -941,12 +1279,59 @@ namespace Ui
 				if (g_quests.empty()) {
 					return Action::kNone;
 				}
-				act = Action::kToggleTrack;
+				st.page = kQuestDetailPage;
+				st.detailScroll = 0;
 				break;
 			case Key::kBack: st.page = kHome; break;
 			default: return Action::kNone;
 			}
 			break;
+		case kQuestDetailPage: {
+			const int nd = g_quests.empty() ? 0 : int(g_quests[std::clamp(st.questScroll, 0, int(g_quests.size()) - 1)].details.size());
+			switch (a_key) {
+			case Key::kUp: st.detailScroll = std::max(0, st.detailScroll - 1); break;
+			case Key::kDown: st.detailScroll = std::min(std::max(0, nd - 1), st.detailScroll + 1); break;
+			case Key::kEnter:
+				if (g_quests.empty()) {
+					return Action::kNone;
+				}
+				act = Action::kToggleTrack;
+				break;
+			case Key::kBack: st.page = kQuestsPage; break;
+			default: return Action::kNone;
+			}
+			break;
+		}
+		case kInfoPage:
+			switch (a_key) {
+			case Key::kUp: st.infoScroll = std::max(0, st.infoScroll - 1); break;
+			case Key::kDown: st.infoScroll = std::min(std::max(0, int(g_infoRows.size()) - 1), st.infoScroll + 1); break;
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		case kMessagesPage: {
+			const bool confirm = st.msgConfirm;
+			st.msgConfirm = false;
+			switch (a_key) {
+			case Key::kUp: st.msgScroll = std::max(0, st.msgScroll - 1); break;
+			case Key::kDown: st.msgScroll = std::min(std::max(0, int(g_messages.size()) - 1), st.msgScroll + 1); break;
+			case Key::kEnter:
+				if (g_messages.empty()) {
+					return Action::kNone;
+				}
+				if (!confirm) {
+					st.msgConfirm = true;
+				} else {
+					g_messages.clear();
+					st.msgScroll = 0;
+				}
+				break;
+			case Key::kBack: st.page = kHome; break;
+			default: return Action::kNone;
+			}
+			break;
+		}
 		case kCameraPage:
 			if (a_key == Key::kEnter) {
 				act = Action::kTakePhoto;
@@ -1055,13 +1440,59 @@ namespace Ui
 	bool WantsQuests()
 	{
 		std::lock_guard lk(g_lock);
-		return g_state.page == kQuestsPage;
+		return g_state.page == kQuestsPage || g_state.page == kQuestDetailPage;
+	}
+
+	Info WantsInfo()
+	{
+		std::lock_guard lk(g_lock);
+		return g_state.page == kInfoPage ? InfoFor(g_state.openedApp) : Info::kNone;
+	}
+
+	void SetInfo(Info a_page, std::vector<InfoRow> a_rows)
+	{
+		std::lock_guard lk(g_lock);
+		if (g_state.page != kInfoPage || InfoFor(g_state.openedApp) != a_page) {
+			return;  // the page changed meanwhile
+		}
+		g_infoPage = a_page;
+		g_infoRows = std::move(a_rows);
+		g_state.infoScroll = std::clamp(g_state.infoScroll, 0, std::max(0, int(g_infoRows.size()) - 1));
+		++g_version;
+	}
+
+	void PushMessage(std::string a_title, std::string a_text)
+	{
+		std::lock_guard lk(g_lock);
+		char            stamp[48];
+		char            clock[16];
+		ClockText(g_state, clock);
+		std::snprintf(stamp, sizeof(stamp), "%u月%u日 %s", g_state.month + 1, g_state.day, clock);
+		g_bannerTitle = a_title;
+		g_bannerText = a_text;
+		g_bannerUntil = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+		g_messages.insert(g_messages.begin(), Message{ std::move(a_title), std::move(a_text), stamp });
+		if (g_messages.size() > 60) {
+			g_messages.resize(60);
+		}
+		if (g_state.page == kMessagesPage) {
+			g_state.msgScroll = 0;
+		} else {
+			++g_unread;
+		}
+		++g_version;
+	}
+
+	int UnreadMessages()
+	{
+		std::lock_guard lk(g_lock);
+		return g_unread;
 	}
 
 	QuestEntry SelectedQuest()
 	{
 		std::lock_guard lk(g_lock);
-		if (g_state.page != kQuestsPage || g_quests.empty()) {
+		if ((g_state.page != kQuestsPage && g_state.page != kQuestDetailPage) || g_quests.empty()) {
 			return {};
 		}
 		return g_quests[std::clamp(g_state.questScroll, 0, int(g_quests.size()) - 1)];
@@ -1127,8 +1558,9 @@ namespace Ui
 		const int   cw = tw;
 		const int   ch = std::max(16, int(std::lround(cw * s.aspect)));
 		const int   minute = int(s.hour * 60.0f);
+		const bool  banner = std::chrono::steady_clock::now() < g_bannerUntil;
 		if (g_canvas.w != cw || g_canvas.h != ch || minute != g_drawnMinute || s.day != g_drawn.day ||
-			g_version != g_drawnVersion ||
+			g_version != g_drawnVersion || banner != g_drawnBanner ||
 			((s.page == kCameraPage || s.page == kGalleryPage) && g_camSeq.load() != g_drawnCamSeq)) {
 			g_drawnCamSeq = g_camSeq.load();
 			g_canvas.Resize(cw, ch);
@@ -1146,6 +1578,7 @@ namespace Ui
 			}
 			g_drawnMinute = minute;
 			g_drawnVersion = g_version;
+			g_drawnBanner = banner;
 		}
 		const float bright = s.brightness / 100.0f;
 		g_drawn = s;

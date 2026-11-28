@@ -58,11 +58,17 @@ namespace Ui
 	const char* OpenKeyName(int a_index);
 
 	// ---- Quests app ----
+	struct Objective
+	{
+		std::string text;
+		int         state = 1;  // 1 in progress, 2 completed, 3 failed
+	};
 	struct QuestEntry
 	{
 		std::string              name;
 		std::string              group;       // quest type shown as a section header ("主线", "派系", ...)
 		std::vector<std::string> objectives;  // in-progress, displayed objectives
+		std::vector<Objective>   details;     // every displayed objective, in quest order (details page)
 		std::uint32_t            formID = 0;
 		bool                     tracked = false;  // Quest.IsActive: shown in the HUD / compass
 	};
@@ -70,6 +76,29 @@ namespace Ui
 	QuestEntry SelectedQuest();
 	bool WantsQuests();                                 // the Quests page is open: feed it with SetQuests
 	void SetQuests(std::vector<QuestEntry> a_quests);  // from the game's task thread
+
+	// ---- info apps (Character, Ship, Star map): label / value rows, optional bar, section headers ----
+	struct InfoRow
+	{
+		std::string label;
+		std::string value;
+		float       fraction = -1.0f;  // 0..1 draws a bar under the row
+		bool        header = false;     // section header (label only)
+	};
+	enum class Info
+	{
+		kNone,
+		kCharacter,
+		kShip,
+		kMap,
+	};
+	Info WantsInfo();                                       // which info page is shown (feed it with SetInfo)
+	void SetInfo(Info a_page, std::vector<InfoRow> a_rows);  // empty = not available
+
+	// ---- Messages app ----
+	// add a message (stamped with the current game date / time); shows a banner while the phone is open
+	void PushMessage(std::string a_title, std::string a_text);
+	int  UnreadMessages();
 
 	// ---- Camera app (fed from the Present hook, see camera.cpp) ----
 	// true while the Camera page is shown; a_w x a_h = viewfinder size in canvas pixels (its aspect sets the crop)

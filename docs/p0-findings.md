@@ -63,3 +63,28 @@
 
 `plugin/` builds `PhoneTest.dll`: F7/F8 slate open/close, F11 cycles the slate's model, log in
 `Documents\My Games\Starfield\SFSE\Logs\PhoneTest.log`.
+
+## Player, ship and location natives (phone apps: Character, Ship, Star map, Messages)
+
+Found with `tools/re/ghidra/NativeFind.java` (LEA of the native name next to the registration call). All ignore
+their VM / stack-ID arguments, so `stats.cpp` calls them directly with `nullptr, 0`.
+
+| What | ID | Signature |
+|---|---|---|
+| ObjectReference.GetValue | 118329 | float (vm, stack, ref, AVIF*) -> ActorValueOwner at ref+0x70, slot 1 |
+| ObjectReference.GetBaseValue | 118296 | float (vm, stack, ref, AVIF*) -> slot 3 |
+| ObjectReference.GetCurrentPlanet | 118491 | PNDT* (vm, stack, ref) |
+| ObjectReference.GetCurrentLocation | 63412 | thunk to TESObjectREFR::GetCurrentLocation (ref) |
+| Actor.GetLevel | 116823 | u16 (vm, stack, actor): base NPC (+0x98) +0xE8; crashes if the base is null |
+| Actor.GetGoldAmount | 116821 | int (vm, stack, actor): credits |
+| Game.GetPlayerHomeSpaceShip | 102957 | FUN_141A6BD50 (player, ref** out); out holds a reference, release with ID 38742 |
+| TESObjectREFR::GetSpaceship | 119881 | ref* (ref, true): ship the ref is aboard, no reference added |
+| Game.GetXPForLevel | 69497 | float (level) |
+| Debug.Notification | 117311 | void (vm, stack, unused, BSFixedString*) (not used yet) |
+
+AVIF IDs: Health 2D4, Oxygen 2D5, CarryWeight 2DC, Experience 2C9, ShieldHealth 24A05F, ShieldMaxHealth 5BFA8,
+SpaceshipGravJumpFuel 854F, SpaceshipGravJumpMaxDistance 8551, SpaceshipMaxAvailablePower 1018,
+SpaceshipCrew 40CE0, SpaceshipPassengerSlots 1E7DE. No AV holds the current inventory weight.
+
+Activities (QTYP QuestTypeActivities 475F8) are pointer quests whose FULL is a developer placeholder
+("FFNeonZ01 wrapper", Chinese "霓虹城Z01的封装"); the phone lists them by objective like the mission menu.

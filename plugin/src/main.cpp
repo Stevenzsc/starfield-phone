@@ -27,6 +27,7 @@
 #include "tuner.h"
 #include "ui.h"
 #include "quests.h"
+#include "stats.h"
 #include "viewprobe.h"
 
 #include <array>
@@ -477,13 +478,54 @@ namespace
 			nextQuests = std::chrono::steady_clock::now();
 		}
 
-		// in-game calendar for the home screen, twice a second
-		static auto nextTime = std::chrono::steady_clock::now();
-		if (g_open && std::chrono::steady_clock::now() >= nextTime) {
+		// Character / Ship / Star map apps: refresh every second while their page is open
+		static auto nextInfo = std::chrono::steady_clock::now();
+		if (const auto info = Ui::WantsInfo(); g_open && info != Ui::Info::kNone) {
+			if (std::chrono::steady_clock::now() >= nextInfo) {
+				nextInfo = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+				switch (info) {
+				case Ui::Info::kCharacter: Ui::SetInfo(info, Stats::Character()); break;
+				case Ui::Info::kShip: Ui::SetInfo(info, Stats::Ship()); break;
+				case Ui::Info::kMap: Ui::SetInfo(info, Stats::Location()); break;
+				default: break;
+				}
+			}
+		} else {
+			nextInfo = std::chrono::steady_clock::now();
+		}
+
+		// in-game calendar (home screen, calendar app, message time stamps), twice a second; also while the phone
+		// is put away, so messages get the right time
+		static auto   nextTime = std::chrono::steady_clock::now();
+		static double gameHours = -1;  // game time at the last message poll, in hours
+		if (std::chrono::steady_clock::now() >= nextTime) {
 			nextTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
 			if (auto* cal = RE::Calendar::GetSingleton()) {
 				Ui::SetGameTime(cal->GetYear(), cal->GetMonth(), cal->GetDay(), cal->GetHour());
 			}
+		}
+
+		// Messages app: objective changes and level-ups, once a second
+		static auto nextPoll = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		if (std::chrono::steady_clock::now() >= nextPoll) {
+			nextPoll = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+			double hours = gameHours;
+			if (auto* cal = RE::Calendar::GetSingleton()) {
+				hours = ((double(cal->GetYear()) * 12 + cal->GetMonth()) * 31 + cal->GetDay()) * 24 + cal->GetHour();
+			}
+			// a save load (or fast travel, sleep) moves the game clock: record the new state without messages
+			const bool silent = gameHours < 0 || hours < gameHours || hours - gameHours > 2.0;
+			gameHours = hours;
+			for (auto& ch : Quests::PollChanges(silent)) {
+				REX::INFO("message: {} | {}", ch.title, ch.text);
+				Ui::PushMessage(std::move(ch.title), std::move(ch.text));
+			}
+			static int lastLevel = 0;
+			const int  level = Stats::PlayerLevel();
+			if (!silent && lastLevel > 0 && level == lastLevel + 1) {
+				Ui::PushMessage("角色", "升级到 " + std::to_string(level) + " 级");
+			}
+			lastLevel = level;
 		}
 	}
 
