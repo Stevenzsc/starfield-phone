@@ -1980,6 +1980,17 @@ namespace
 		y += int(f * 2.2f);
 		const std::string status = ct.dead ? Tr("无法接通") : (g_callResult.empty() ? Tr("通话中…") : g_callResult);
 		TextCentered(c, c.w / 2, y, status.c_str(), f, ct.dead ? kWarn : kGold);
+		// connected, not yet summoned: a button that says what Enter does (the prompt bar alone was missed)
+		if (!ct.dead && g_callResult.empty()) {
+			y += int(f * 2.4f);
+			const std::string label = std::string(PromptKey("Enter")) + "   " + Tr("叫过来");
+			const float       bf = f * 1.1f;
+			const int         bw = std::max(int(W * 0.6f), TextWidth(label.c_str(), bf) + int(bf * 2.0f)), bh = int(bf * 2.2f);
+			Rect(c, c.w / 2 - bw / 2, y, bw, bh, kSelBg);
+			TextCentered(c, c.w / 2, y + (bh - int(bf * 1.3f)) / 2, label.c_str(), bf, kSelText);
+			y += bh + int(f * 0.7f);
+			TextCentered(c, c.w / 2, y, Tr("让对方传送到你身边"), f * 0.85f, kDim);
+		}
 	}
 
 	const char* Direction(float a_right, float a_forward)

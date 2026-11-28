@@ -44,6 +44,7 @@ namespace
 			{ "确认清除", "Confirm" },
 			{ "呼叫", "Call" },
 			{ "叫过来", "Come here" },
+			{ "让对方传送到你身边", "Brings them to where you are" },
 			{ "挂断", "Hang up" },
 			{ "拍照", "Shoot" },
 			{ "拍照模式", "Photo mode" },
