@@ -417,7 +417,9 @@ namespace
 		ID3D12Resource*     bb = nullptr;
 		ID3D12CommandQueue* queue = nullptr;
 		ID3D12Device*       dev = nullptr;
+		ID3D12Resource*     vt = nullptr;  // second-view render texture (viewprobe.cpp), preferred over the back buffer
 		auto release = [&] {
+			if (vt) vt->Release();
 			if (bb) bb->Release();
 			if (queue) queue->Release();
 			if (dev) dev->Release();
@@ -464,13 +466,25 @@ namespace
 			return fail("capture setup", E_FAIL);
 		}
 
-		const auto bd = bb->GetDesc();
-		const Kind kind = KindOf(bd.Format);
+		vt = Screen::ViewTarget();
+		if (vt) {
+			ID3D12Device* vdev = nullptr;
+			if (SUCCEEDED(vt->GetDevice(IID_PPV_ARGS(&vdev)))) {
+				if (vdev != dev) {
+					vt->Release();
+					vt = nullptr;
+				}
+				vdev->Release();
+			}
+		}
+		ID3D12Resource* srcRes = vt ? vt : bb;
+		const auto      bd = srcRes->GetDesc();
+		const Kind      kind = KindOf(bd.Format);
 		if (kind == Kind::kUnsupported) {
 			static bool once = false;
 			if (!once) {
 				once = true;
-				Log("camera: back buffer format %d not supported", bd.Format);
+				Log("camera: %s format %d not supported", vt ? "view target" : "back buffer", bd.Format);
 			}
 			release();
 			return;
@@ -530,19 +544,23 @@ namespace
 		b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 		b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
 		b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-		g_c.list->ResourceBarrier(1, &b);
+		if (!vt) {  // the view target was created with simultaneous access: no barriers
+			g_c.list->ResourceBarrier(1, &b);
+		}
 		D3D12_TEXTURE_COPY_LOCATION dst{};
 		dst.pResource = slot->buf;
 		dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
 		dst.PlacedFootprint = slot->fp;
 		D3D12_TEXTURE_COPY_LOCATION src{};
-		src.pResource = bb;
+		src.pResource = srcRes;
 		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 		src.SubresourceIndex = 0;
 		const D3D12_BOX box{ x0, y0, 0, x0 + cw, y0 + ch, 1 };
 		g_c.list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
 		std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
-		g_c.list->ResourceBarrier(1, &b);
+		if (!vt) {
+			g_c.list->ResourceBarrier(1, &b);
+		}
 		g_c.list->Close();
 
 		ID3D12CommandList* lists[] = { g_c.list };
@@ -552,6 +570,11 @@ namespace
 		slot->pending = true;
 		g_c.last = now;
 
+		static bool loggedView = false;
+		if (vt && !loggedView) {
+			loggedView = true;
+			Log("camera: now reading the second view: %ux%u fmt=%d, crop %ux%u", W, H, bd.Format, cw, ch);
+		}
 		if (++g_c.frames == 1) {
 			Log("camera: first capture %ux%u fmt=%d, crop %ux%u at (%u,%u), viewfinder %dx%d", W, H, bd.Format, cw, ch, x0, y0, vw, vh);
 		}

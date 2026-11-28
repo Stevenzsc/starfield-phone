@@ -228,9 +228,6 @@ namespace
 	constexpr auto                        kActionGap = std::chrono::milliseconds(2500);
 	std::chrono::steady_clock::time_point g_lastAction{};
 
-	// photo in progress: the 1st-person body is hidden until the frame is copied (or this deadline)
-	bool                                  g_photoHiding = false;
-	std::chrono::steady_clock::time_point g_photoUnhideBy{};
 
 	void Perform(const Binding& a_b);
 
@@ -429,17 +426,8 @@ namespace
 					break;
 				}
 				case Ui::Action::kTakePhoto:
-					// hide the hand + phone, wait a few frames so temporal AA drops them, copy, show them again
-					if (!g_photoHiding && Tuner::SetFirstPersonHidden(true)) {
-						if (Camera::RequestPhoto(6, 120)) {
-							g_photoHiding = true;
-							g_photoUnhideBy = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-						} else {
-							Tuner::SetFirstPersonHidden(false);
-						}
-					} else if (!g_photoHiding) {
-						Camera::RequestPhoto();
-					}
+					// the photo comes from the same source as the viewfinder (the second view once it renders)
+					Camera::RequestPhoto();
 					break;
 				case Ui::Action::kOpenPhotoMode:
 					// put the phone away, then open photo mode once the hand is down
@@ -471,11 +459,11 @@ namespace
 			}
 		}
 
-		if (g_photoHiding && (Camera::PhotoCopied() || !g_open || std::chrono::steady_clock::now() >= g_photoUnhideBy)) {
-			Tuner::SetFirstPersonHidden(false);
-			g_photoHiding = false;
+		// second view: our own camera + output rendered into a texture while the Camera page is shown
+		{
+			int cw = 0, ch = 0;
+			ViewProbe::Tick(g_open && Ui::CameraTarget(cw, ch));
 		}
-		// second-view prototype (ViewProbe::SetSecondView) is off: output 01000004 is not rendered in normal play
 		Tuner::Tick(g_open && g_devKeys);
 
 		// Quests app: refresh every 2 s while its page is open
@@ -527,6 +515,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
 	REX::INFO("PhoneTest loaded; PerformAction ptr at Starfield.exe+0x{:X}", kPerformActionPtr.offset());
 	Ui::Init([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Screen::Install(kScreenWidth, kScreenHeight, [](const char* a_msg) { REX::INFO("{}", a_msg); });
+	Screen::WatchViewTarget(ViewProbe::kTargetWidth, ViewProbe::kTargetHeight);
 	Camera::Install([](const char* a_msg) { REX::INFO("{}", a_msg); });
 	Tuner::Install();
 	if (const auto* msg = SFSE::GetMessagingInterface(); !msg || !msg->RegisterListener(OnMessage)) {

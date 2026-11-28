@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <format>
 #include <new>
 #include <string>
@@ -30,6 +31,12 @@ namespace
 		} __except (1) {
 			return false;
 		}
+	}
+
+	bool Call(REL::ID a_id, std::uintptr_t a_a, std::uintptr_t a_b = 0, std::uintptr_t a_c = 0, std::uintptr_t a_d = 0,
+		std::uintptr_t* a_ret = nullptr)
+	{
+		return CallRaw(a_id.address(), a_a, a_b, a_c, a_d, a_ret);
 	}
 
 	template <class T>
@@ -315,37 +322,198 @@ namespace
 		std::uint32_t pad1 = 0;
 		std::uint32_t data[4]{};
 	};
+
+	// ---- step 3: own output + render texture, queued for rendering every frame ----
+	constexpr REL::ID kCreateTexture{ 140022 };    // FUN_1428FC910(&BSFixedString name, desc[0x48], &texture) -> 0 / 6 ok
+	constexpr REL::ID kBindTexture{ 140237 };      // FUN_142912210(desc, slot hash, &texture)
+	constexpr REL::ID kQueueOutput{ 54145 };       // FUN_140840B40(desc): render this output descriptor
+	constexpr REL::ID kCreateOutput{ 52406 };      // FUN_1407CA380(&handle)
+	constexpr REL::ID kSetOutputType{ 37829 };     // FUN_140342CE0(&output, { u8 type, BSFixedString name })
+	constexpr REL::ID kSetOutputSettings{ 54153 }; // FUN_140841410(&output, settings[0x30]) (tone-map parameters)
+	constexpr REL::ID kSetOutputFlag{ 54154 };     // FUN_140841500(&output, &u8)
+	constexpr REL::ID kSetFrustum{ 147392 };       // FUN_142BE2F60(camera, float[4] left right top bottom)
+	constexpr std::uint32_t kMainImageSlot = 0x09681900;  // final image slot of the main output (descriptor +0x10)
+
+	using Fn4 = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
+
+	bool CallRaw(std::uintptr_t a_fn, std::uintptr_t a_a, std::uintptr_t a_b, std::uintptr_t a_c, std::uintptr_t a_d,
+		std::uintptr_t* a_ret)
+	{
+		const auto fn = reinterpret_cast<Fn4>(a_fn);
+		__try {
+			const auto r = fn(a_a, a_b, a_c, a_d);
+			if (a_ret) {
+				*a_ret = r;
+			}
+			return true;
+		} __except (1) {
+			return false;
+		}
+	}
+
+	bool Call(REL::ID a_id, std::uintptr_t a_a, std::uintptr_t a_b = 0, std::uintptr_t a_c = 0, std::uintptr_t a_d = 0,
+		std::uintptr_t* a_ret = nullptr)
+	{
+		return CallRaw(a_id.address(), a_a, a_b, a_c, a_d, a_ret);
+	}
+
+	template <class T>
+	std::uintptr_t A(T* a_p)
+	{
+		return reinterpret_cast<std::uintptr_t>(a_p);
+	}
+
+	enum class Stage
+	{
+		kIdle,
+		kTexturePending,
+		kReady,
+		kFailed,
+	};
+	Stage                    g_stage = Stage::kIdle;
+	std::uintptr_t           g_texture = 0;        // engine texture object (refcount at +0x14)
+	std::uint32_t            g_output = 0xFFFFFF;
+	alignas(16) std::uint8_t g_desc[0x80]{};       // output descriptor
+	std::uint32_t            g_queued = 0;
+	std::chrono::steady_clock::time_point g_nextQueue{};
+
+	bool TextureReady(std::uintptr_t a_tex)
+	{
+		const auto s = U32(a_tex + 0x14) & 0x70000000;
+		return s == 0x30000000 || s == 0x40000000;  // same test as the starmap scanner
+	}
+
+	bool StartTexture()
+	{
+		struct Name
+		{
+			RE::BSFixedString s{ "PhoneCameraTarget" };
+		} name;
+		std::uint32_t d[0x12]{};  // 0x48 bytes, as the starmap scanner fills it
+		d[0] = 0x80;
+		d[1] = ViewProbe::kTargetWidth;
+		d[2] = ViewProbe::kTargetHeight;
+		d[3] = 1;
+		d[4] = 2;
+		d[5] = 1;
+		d[6] = 0x2401;
+		d[11] = 0x101006;
+		d[12] = 0x05040302;
+		d[14] = 1;
+		std::uintptr_t r = 0;
+		if (!Call(kCreateTexture, A(&name.s), A(d), A(&g_texture), 0, &r)) {
+			REX::ERROR("view2: texture creation faulted");
+			return false;
+		}
+		REX::INFO("view2: texture {:X} created ({}x{}) -> {} state {:08X}", g_texture, ViewProbe::kTargetWidth,
+			ViewProbe::kTargetHeight, static_cast<int>(r), g_texture ? U32(g_texture + 0x14) : 0);
+		return g_texture != 0;
+	}
+
+	bool BuildOutput()
+	{
+		const auto holder = Ptr(kWorldHolder.address());
+		const auto outs = Ptr(kOutputTable.address());
+		if (!holder || !outs) {
+			return false;
+		}
+		if (!Call(kCreateOutput, A(&g_output)) || (g_output & 0xFFFFFF) == 0xFFFFFF) {
+			REX::ERROR("view2: output creation failed");
+			return false;
+		}
+		struct TypeName
+		{
+			std::uint8_t      type = 0x55;  // main world pipeline
+			std::uint8_t      pad[7]{};
+			RE::BSFixedString name{ "PhoneCamera" };
+		} tn;
+		std::uint8_t settings[0x30]{};
+		std::uintptr_t setRow = 0;
+		const auto     setCol = Ptr(outs + 0xE8);
+		const std::uint32_t main = U32(holder + 0x3D8);
+		const bool haveSettings = setCol && Row(setCol, main & 0xFFFFFF, 0x2C8, 0x30, setRow) && SafeRead(setRow, settings, 0x30);
+		std::uint8_t flag = 0;
+		ViewList     list;
+		list.count = 1;
+		list.data[0] = g_view;
+		const auto listCol = Ptr(outs + 0x120);
+		const bool ok = Call(kSetOutputType, A(&g_output), A(&tn)) && (!haveSettings || Call(kSetOutputSettings, A(&g_output), A(settings))) &&
+		                Call(kSetOutputFlag, A(&g_output), A(&flag)) && listCol &&
+		                CallSetList(reinterpret_cast<void*>(kSetViewList.address()), listCol, g_output & 0xFFFFFF, &list);
+		if (!ok) {
+			REX::ERROR("view2: output setup faulted");
+			return false;
+		}
+		// descriptor: inline binding array (4 x 0x18), +0x70 target object (none), +0x78 output
+		std::memset(g_desc, 0, sizeof(g_desc));
+		*reinterpret_cast<std::uint32_t*>(g_desc + 8) = 0x80000004;
+		*reinterpret_cast<std::uint32_t*>(g_desc + 0x78) = g_output;
+		if (!Call(kBindTexture, A(g_desc), kMainImageSlot, A(&g_texture))) {
+			REX::ERROR("view2: binding the texture faulted");
+			return false;
+		}
+		REX::INFO("view2: output {:08X} ready (settings {}), desc {}", g_output, haveSettings, Hex(A(g_desc), 0x80));
+		LogViewList(outs, g_output, "phone output");
+		return true;
+	}
 }
 
 namespace ViewProbe
 {
-	void SetSecondView(bool a_on)
+	void SetSecondView(bool) {}
+
+	void Tick(bool a_on)
 	{
-		if (a_on == g_enabled) {
+		if (!a_on || g_stage == Stage::kFailed) {
 			return;
 		}
-		if (a_on && !Create()) {
+		switch (g_stage) {
+		case Stage::kIdle:
+			if (!Create() || !StartTexture()) {
+				g_stage = Stage::kFailed;
+				return;
+			}
+			{
+				// portrait frustum for the phone target: { left, right, top, bottom }, 60 degrees vertical
+				const auto  cam = *reinterpret_cast<std::uintptr_t*>(g_obj + 0x18);
+				const float t = 0.57735f;  // tan(30 deg)
+				const float x = t * float(ViewProbe::kTargetWidth) / float(ViewProbe::kTargetHeight);
+				float       f[4] = { -x, x, t, -t };
+				if (!Call(kSetFrustum, cam, A(f))) {
+					REX::WARN("view2: setting the frustum faulted");
+				}
+			}
+			g_stage = Stage::kTexturePending;
+			return;
+		case Stage::kTexturePending:
+			if (!TextureReady(g_texture)) {
+				return;
+			}
+			REX::INFO("view2: texture ready, state {:08X}", U32(g_texture + 0x14));
+			if (!BuildOutput()) {
+				g_stage = Stage::kFailed;
+				return;
+			}
+			g_stage = Stage::kReady;
+			[[fallthrough]];
+		case Stage::kReady: {
+			const auto now = std::chrono::steady_clock::now();
+			if (now < g_nextQueue) {
+				return;
+			}
+			g_nextQueue = now + std::chrono::milliseconds(33);  // ~30 renders per second
+			if (!Call(kQueueOutput, A(g_desc))) {
+				REX::ERROR("view2: queueing the output faulted");
+				g_stage = Stage::kFailed;
+				return;
+			}
+			if (++g_queued == 1 || g_queued % 300 == 0) {
+				REX::INFO("view2: output queued {} times", g_queued);
+			}
 			return;
 		}
-		const auto holder = Ptr(kWorldHolder.address());
-		const auto outs = Ptr(kOutputTable.address());
-		const auto col = outs ? Ptr(outs + 0x120) : 0;
-		if (!holder || !col) {
+		default:
 			return;
 		}
-		const std::uint32_t out = U32(holder + 0x3DC);  // second main output (type 0x5A), idle in normal play
-		ViewList list;
-		if (a_on) {
-			list.count = 1;
-			list.data[0] = g_view;
-		}
-		if (!CallSetList(reinterpret_cast<void*>(kSetViewList.address()), col, out & 0xFFFFFF, &list)) {
-			REX::ERROR("view2: setting the view list of output {:08X} faulted", out);
-			g_failed = true;
-			return;
-		}
-		g_enabled = a_on;
-		REX::INFO("view2: view {:08X} {} output {:08X}", g_view, a_on ? "added to" : "removed from", out);
-		LogViewList(outs, out, "output1");
 	}
 }
