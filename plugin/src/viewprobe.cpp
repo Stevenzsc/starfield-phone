@@ -421,6 +421,28 @@ namespace
 		return true;
 	}
 
+	// Our camera hangs under "World Camera Root" like the world camera, but the view direction lives in the world
+	// camera's own transform (identity under the root rendered the world sideways and static): copy its local
+	// (+0x40) and world (+0x80) NiTransform (0x40 bytes each) every frame.
+	void FollowMainCamera()
+	{
+		const auto holder = Ptr(kWorldHolder.address());
+		const auto mainCam = holder ? Ptr(holder + 0x80) : 0;
+		const auto ourCam = *reinterpret_cast<std::uintptr_t*>(g_obj + 0x18);
+		if (!mainCam || !ourCam) {
+			return;
+		}
+		std::uint8_t xf[0x80];
+		if (SafeRead(mainCam + 0x40, xf, sizeof(xf))) {
+			std::memcpy(reinterpret_cast<void*>(ourCam + 0x40), xf, sizeof(xf));
+		}
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			REX::INFO("view2: main camera local {} world {}", Hex(mainCam + 0x40, 0x40), Hex(mainCam + 0x80, 0x40));
+		}
+	}
+
 	bool BuildOutput()
 	{
 		const auto holder = Ptr(kWorldHolder.address());
@@ -506,6 +528,7 @@ namespace ViewProbe
 			g_nextQueue = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
 			return;
 		case Stage::kReady: {
+			FollowMainCamera();
 			const auto now = std::chrono::steady_clock::now();
 			if (now < g_nextQueue) {
 				return;
