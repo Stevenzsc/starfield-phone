@@ -7,8 +7,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <format>
+#include <new>
 #include <string>
 
 namespace
@@ -143,5 +145,187 @@ namespace ViewProbe
 		}
 		LogViewList(outs, o0, "output0");
 		LogViewList(outs, o1, "output1");
+	}
+}
+
+// ---- step 2: our own camera + view in the world scene, rendered through the idle second main output ----
+namespace
+{
+	constexpr REL::ID kCreateCameraView{ 130594 };  // FUN_142550860(obj, &sceneObj, envHandle, fov, exposure)
+	constexpr REL::ID kSetViewList{ 140277 };       // FUN_142914b90(column, index, BSTSmallArray<u32>*)
+	constexpr REL::ID kSetViewBinding{ 54152 };     // FUN_140841310(&view, binding[0x1C])
+
+	using CreateCameraView_t = void (*)(void* a_obj, void* a_sceneObjSlot, std::uint32_t a_env, float a_fov, float a_exposure);
+	using SetViewList_t = void (*)(std::uintptr_t a_column, std::uint32_t a_index, void* a_array);
+	using SetViewBinding_t = void (*)(std::uint32_t* a_view, void* a_binding);
+	using AttachChild_t = void (*)(void* a_node, void* a_child, bool a_firstAvailable);
+
+	// The object FUN_142550860 fills: +0x00 BSFixedString name, +0x18 NiCamera*, +0x28 view handle, +0x2C env handle
+	alignas(16) std::uint8_t g_obj[0x40]{};
+	bool                     g_created = false;
+	bool                     g_failed = false;
+	bool                     g_enabled = false;
+	std::uint32_t            g_view = 0xFFFFFF;
+
+	// engine calls under SEH: a fault is logged and the feature is switched off instead of crashing the game
+	bool CallCreate(void* a_fn, void* a_obj, void* a_slot, std::uint32_t a_env, float a_fov, float a_exp)
+	{
+		__try {
+			reinterpret_cast<CreateCameraView_t>(a_fn)(a_obj, a_slot, a_env, a_fov, a_exp);
+			return true;
+		} __except (1) {
+			return false;
+		}
+	}
+
+	bool CallAttach(void* a_fn, void* a_node, void* a_child)
+	{
+		__try {
+			reinterpret_cast<AttachChild_t>(a_fn)(a_node, a_child, true);
+			return true;
+		} __except (1) {
+			return false;
+		}
+	}
+
+	bool CallSetList(void* a_fn, std::uintptr_t a_col, std::uint32_t a_index, void* a_array)
+	{
+		__try {
+			reinterpret_cast<SetViewList_t>(a_fn)(a_col, a_index, a_array);
+			return true;
+		} __except (1) {
+			return false;
+		}
+	}
+
+	bool CallSetBinding(void* a_fn, std::uint32_t* a_view, void* a_binding)
+	{
+		__try {
+			reinterpret_cast<SetViewBinding_t>(a_fn)(a_view, a_binding);
+			return true;
+		} __except (1) {
+			return false;
+		}
+	}
+
+	// PhoneTest.ini viewfinder_near=<float> (0 = keep the engine's near plane)
+	float IniNear()
+	{
+		std::FILE* f = nullptr;
+		if (fopen_s(&f, "Data\\SFSE\\Plugins\\PhoneTest.ini", "r") != 0 || !f) {
+			return 0.0f;
+		}
+		char  line[256];
+		float v = 0.0f;
+		while (std::fgets(line, sizeof(line), f)) {
+			if (std::strncmp(line, "viewfinder_near=", 16) == 0) {
+				v = static_cast<float>(std::atof(line + 16));
+			}
+		}
+		std::fclose(f);
+		return v;
+	}
+
+	bool Create()
+	{
+		if (g_created || g_failed) {
+			return g_created;
+		}
+		g_failed = true;  // cleared on success
+		const auto holder = Ptr(kWorldHolder.address());
+		if (!holder) {
+			REX::WARN("view2: no world holder");
+			return false;
+		}
+		const std::uint32_t env = U32(holder + 0x64);
+		std::memset(g_obj, 0, sizeof(g_obj));
+		new (g_obj) RE::BSFixedString("PhoneCameraView");
+		*reinterpret_cast<std::uint32_t*>(g_obj + 0x28) = 0xFFFFFF;
+		*reinterpret_cast<std::uint32_t*>(g_obj + 0x2C) = 0xFFFFFF;
+		REX::INFO("view2: creating camera + view (scene slot {:X}, env {:08X})", holder + 0x70, env);
+		if (!CallCreate(reinterpret_cast<void*>(kCreateCameraView.address()), g_obj, reinterpret_cast<void*>(holder + 0x70), env,
+				70.0f, 1.0f)) {
+			REX::ERROR("view2: FUN_142550860 faulted");
+			return false;
+		}
+		const auto cam = *reinterpret_cast<std::uintptr_t*>(g_obj + 0x18);
+		g_view = *reinterpret_cast<std::uint32_t*>(g_obj + 0x28);
+		REX::INFO("view2: camera {:X} handle {:08X} local translate {} view {:08X} env {:08X}", cam, cam ? U32(cam + 0x130) : 0,
+			cam ? Hex(cam + 0x70, 12) : std::string("-"), g_view, U32(reinterpret_cast<std::uintptr_t>(g_obj) + 0x2C));
+		if (!cam || (g_view & 0xFFFFFF) >= 64) {
+			return false;
+		}
+
+		// follow the eye: hang the camera under "World Camera Root", like the world camera itself
+		const auto root = Ptr(holder + 0x78);
+		const auto vtbl = root ? Ptr(root) : 0;
+		const auto attach = vtbl ? Ptr(vtbl + 0x2A0) : 0;
+		if (!attach || !CallAttach(reinterpret_cast<void*>(attach), reinterpret_cast<void*>(root), reinterpret_cast<void*>(cam))) {
+			REX::ERROR("view2: attaching the camera to the world camera root failed");
+			return false;
+		}
+
+		// binding row: { scene, camera, flags, fov, near, far, u32 } -> optional near plane from the ini
+		const auto views = Ptr(kViewTable.address());
+		const auto bind = views ? Ptr(views + 0x120) : 0;
+		std::uintptr_t row = 0;
+		if (bind && Row(bind, g_view & 0xFFFFFF, 0x2C8, 0x1C, row)) {
+			std::uint8_t b[0x1C]{};
+			if (SafeRead(row, b, sizeof(b))) {
+				REX::INFO("view2: binding {}", Hex(row, 0x1C));
+				const float nearPlane = IniNear();
+				if (nearPlane > 0.0f) {
+					std::memcpy(b + 0x10, &nearPlane, 4);
+					CallSetBinding(reinterpret_cast<void*>(kSetViewBinding.address()), &g_view, b);
+					REX::INFO("view2: near plane set to {} -> binding {}", nearPlane, Hex(row, 0x1C));
+				}
+			}
+		}
+		g_created = true;
+		g_failed = false;
+		return true;
+	}
+
+	// BSTSmallArray<u32> as the engine lays it out: count, pad, capacity | 0x80000000 (inline), pad, inline data
+	struct ViewList
+	{
+		std::uint32_t count = 0;
+		std::uint32_t pad0 = 0;
+		std::uint32_t cap = 0x80000004;
+		std::uint32_t pad1 = 0;
+		std::uint32_t data[4]{};
+	};
+}
+
+namespace ViewProbe
+{
+	void SetSecondView(bool a_on)
+	{
+		if (a_on == g_enabled) {
+			return;
+		}
+		if (a_on && !Create()) {
+			return;
+		}
+		const auto holder = Ptr(kWorldHolder.address());
+		const auto outs = Ptr(kOutputTable.address());
+		const auto col = outs ? Ptr(outs + 0x120) : 0;
+		if (!holder || !col) {
+			return;
+		}
+		const std::uint32_t out = U32(holder + 0x3DC);  // second main output (type 0x5A), idle in normal play
+		ViewList list;
+		if (a_on) {
+			list.count = 1;
+			list.data[0] = g_view;
+		}
+		if (!CallSetList(reinterpret_cast<void*>(kSetViewList.address()), col, out & 0xFFFFFF, &list)) {
+			REX::ERROR("view2: setting the view list of output {:08X} faulted", out);
+			g_failed = true;
+			return;
+		}
+		g_enabled = a_on;
+		REX::INFO("view2: view {:08X} {} output {:08X}", g_view, a_on ? "added to" : "removed from", out);
+		LogViewList(outs, out, "output1");
 	}
 }
