@@ -12,6 +12,7 @@
 #include "pch.h"
 #include "quests.h"
 
+#include <algorithm>
 #include <string>
 
 namespace
@@ -21,6 +22,8 @@ namespace
 	constexpr std::ptrdiff_t kObjArray = 0x150;
 	constexpr std::ptrdiff_t kObjState = 0x28;
 	constexpr int            kStateDisplayed = 1;
+	constexpr std::ptrdiff_t kDnamType = 0x110;      // DNAM bytes 8-11 (quest type?)
+	constexpr std::ptrdiff_t kDnamPriority = 0x118;  // DNAM byte 4 (priority?)
 
 	template <class T>
 	T Read(const void* a_base, std::ptrdiff_t a_off)
@@ -28,26 +31,15 @@ namespace
 		return *reinterpret_cast<const T*>(reinterpret_cast<std::uintptr_t>(a_base) + a_off);
 	}
 
-	std::ptrdiff_t g_fullNameOffset = -1;  // -1 = not searched yet, 0 = not found
+	// The quest name is not inside TESQuest: the loader (FUN_140D0B8D0) puts FULL in a separate form component
+	// (key DAT_145FDCE50). FUN_1405E3E30 (Address Library ID 47496) returns a form's full name through it, already
+	// without a "<ID=...>" prefix.
+	constexpr REL::ID kGetFullName{ 47496 };
 
 	const char* QuestName(const RE::TESForm* a_quest)
 	{
-		if (g_fullNameOffset < 0) {
-			g_fullNameOffset = 0;
-			const auto vtbl = RE::VTABLE::TESFullName[0].address();
-			for (std::ptrdiff_t off = 0x30; off < kQuestFlags; off += 8) {
-				if (Read<std::uintptr_t>(a_quest, off) == vtbl) {
-					g_fullNameOffset = off;
-					break;
-				}
-			}
-			REX::INFO("quests: TESFullName component at +0x{:X}", g_fullNameOffset);
-		}
-		if (g_fullNameOffset == 0) {
-			return nullptr;
-		}
-		const auto* full = reinterpret_cast<const RE::TESFullName*>(reinterpret_cast<std::uintptr_t>(a_quest) + g_fullNameOffset);
-		return full->fullName.c_str();
+		using fn_t = const char* (*)(const RE::TESForm*);
+		return reinterpret_cast<fn_t>(kGetFullName.address())(a_quest);
 	}
 
 	std::string Clean(const char* a_text)
@@ -128,10 +120,15 @@ namespace Quests
 		if (!g_scanned) {
 			ScanQuests();
 		}
+		struct Keyed
+		{
+			std::uint32_t      type;
+			std::uint8_t       priority;
+			const RE::TESForm* form;
+			Ui::QuestEntry     entry;
+		};
+		std::vector<Keyed> keyed;
 		for (const RE::TESForm* q : g_quests) {
-			if (result.size() >= a_maxQuests) {
-				break;
-			}
 			const auto count = Read<std::uint32_t>(q, kObjCount);
 			const auto objs = Read<const void* const*>(q, kObjArray);
 			if (!objs || count == 0 || count > 1024) {
@@ -156,8 +153,23 @@ namespace Quests
 			if (entry.name.empty()) {
 				entry.name = q->GetFormEditorID() ? q->GetFormEditorID() : "?";
 			}
-			result.push_back(std::move(entry));
+			keyed.push_back({ Read<std::uint32_t>(q, kDnamType), Read<std::uint8_t>(q, kDnamPriority), q, std::move(entry) });
 		}
+		// quest type ascending, then priority descending (to be confirmed in game: see the log below)
+		std::stable_sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b) {
+			return a.type != b.type ? a.type < b.type : a.priority > b.priority;
+		});
+		static bool logged = false;
+		for (auto& k : keyed) {
+			if (!logged) {
+				REX::INFO("quests: type {} priority {} {:08X} '{}' = '{}'", k.type, k.priority, k.form->GetFormID(),
+					k.form->GetFormEditorID() ? k.form->GetFormEditorID() : "", k.entry.name);
+			}
+			if (result.size() < a_maxQuests) {
+				result.push_back(std::move(k.entry));
+			}
+		}
+		logged = logged || !keyed.empty();
 		return result;
 	}
 }
