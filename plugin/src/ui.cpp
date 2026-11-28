@@ -1269,7 +1269,7 @@ namespace
 			std::vector<std::vector<std::string>> obj;
 			int                                   h = 0;  // name + objectives
 		};
-		std::vector<Block> blocks(std::size_t(n));
+		std::vector<Block> blocks(static_cast<std::size_t>(n));  // not std::size_t(n): that parses as a function declaration
 		for (int i = 0; i < n; ++i) {
 			const auto& q = g_quests[i];
 			auto&       b = blocks[i];
