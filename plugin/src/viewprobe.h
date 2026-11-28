@@ -13,7 +13,7 @@ namespace ViewProbe
 
 	// Step 3: our camera + view rendered into our own output and texture (kTargetWidth x kTargetHeight), queued
 	// every frame while a_on. screen.cpp finds the texture's D3D12 resource by this unique size.
-	inline constexpr std::uint32_t kTargetWidth = 872;
-	inline constexpr std::uint32_t kTargetHeight = 606;
+	inline constexpr std::uint32_t kTargetWidth = 1308;
+	inline constexpr std::uint32_t kTargetHeight = 909;
 	void Tick(bool a_on);
 }

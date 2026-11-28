@@ -469,6 +469,41 @@ namespace
 		}
 	}
 
+	// Feature flags of a view: 0x210 bytes in view column +0x108 (FUN_14083FC30 copies that much). FUN_142550860
+	// fills ours from the global settings with bits 22, 34, 38 and 43 cleared, and that view drew no characters or
+	// ships and less detail: give it the main view's flags instead.
+	constexpr REL::ID kSetViewFlags{ 128330 };  // FUN_14248D200(&view, flags[0x210])
+	constexpr std::size_t kFlagsSize = 0x210;
+
+	void CopyMainViewFlags()
+	{
+		const auto holder = Ptr(kWorldHolder.address());
+		const auto views = Ptr(kViewTable.address());
+		const auto col = views ? Ptr(views + 0x108) : 0;
+		if (!holder || !col) {
+			return;
+		}
+		const std::uint32_t mainView = U32(holder + 0x3D0);
+		std::uintptr_t      mainRow = 0, ourRow = 0;
+		alignas(16) std::uint8_t flags[kFlagsSize]{};
+		if (!Row(col, mainView & 0xFFFFFF, 0x2C8, kFlagsSize, mainRow) || !SafeRead(mainRow, flags, sizeof(flags))) {
+			REX::WARN("view2: main view flags unreadable");
+			return;
+		}
+		const bool haveOurs = Row(col, g_view & 0xFFFFFF, 0x2C8, kFlagsSize, ourRow);
+		REX::INFO("view2: main view flags {}", Hex(mainRow, 0x20));
+		if (haveOurs) {
+			REX::INFO("view2: our view flags before {}", Hex(ourRow, 0x20));
+		}
+		if (!Call(kSetViewFlags, A(&g_view), A(flags))) {
+			REX::ERROR("view2: setting the view flags faulted");
+			return;
+		}
+		if (haveOurs) {
+			REX::INFO("view2: our view flags after {}", Hex(ourRow, 0x20));
+		}
+	}
+
 	bool BuildOutput()
 	{
 		const auto holder = Ptr(kWorldHolder.address());
@@ -527,6 +562,7 @@ namespace ViewProbe
 				g_stage = Stage::kFailed;
 				return;
 			}
+			CopyMainViewFlags();
 			{
 				// frustum matching the target's aspect: { left, right, top, bottom }, 60 degrees vertical
 				const auto  cam = *reinterpret_cast<std::uintptr_t*>(g_obj + 0x18);
